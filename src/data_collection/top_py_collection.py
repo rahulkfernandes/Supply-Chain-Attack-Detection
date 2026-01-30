@@ -20,7 +20,7 @@ class TopPyPi:
     uni_rnd_lim = (0, 0.2)
     hash_algo = 'sha256'
     chunk_size = 65536 # 64kb
-    
+
     def __init__(
             self, 
             num_packs: int, 
@@ -69,7 +69,7 @@ class TopPyPi:
         
         self.topN_list = [row.get('project') for row in rows[:self.num_packs]]
     
-    def _fetch_latest_vers(self, pkg):
+    def _fetch_latest_vers(self, pkg) -> str:
         
         for attempt in range(1, self.max_retries + 1):
             try:
@@ -188,4 +188,30 @@ class TopPyPi:
                 except Exception as e:
                     results.append((pkg, False, f'Unexpected Error:{e}'))
 
-        print(results)
+        # Save report
+        self._save_to_json(
+            results,
+            os.path.join(self.out_dir, 'pypi_dwnld_report.json')
+        )
+        
+        print('Done. Summary:')
+        ok_count = sum(1 for p,o,_ in results if o)
+        print(f'Successful: {ok_count}/{len(results)}')
+
+    def set_timeout(self, timeout: int):
+        self.timeout = timeout
+
+    def set_max_retries(self, max_retries: int):
+        self.max_retries = max_retries
+    
+    def set_max_workers(self, max_workers: int):
+        self.max_workers = max_workers
+    
+    def set_uni_rnd_lim(self, uni_rnd_lim: Tuple):
+        self.uni_rnd_lim = uni_rnd_lim
+    
+    def set_hash_algo(self, hash_algo: str):
+        self.hash_algo = hash_algo
+    
+    def set_chunk_size(self, chunk_size: int):
+        self.chunk_size = chunk_size
