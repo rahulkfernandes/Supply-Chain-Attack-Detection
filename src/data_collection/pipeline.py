@@ -8,3 +8,4 @@ def run_collection_pipeline(paths_config: str):
     
     top_pypi = TopPyPi(5, raw_path)
     top_pypi.get_top_pypi()
+    top_pypi.download_packages()
