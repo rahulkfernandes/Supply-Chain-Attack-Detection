@@ -1,5 +1,5 @@
 from pathlib import Path
-from src.data_collection.top_py_collection import TopPyPi
+from src.data_collection.top_pkg_collection import TopPyPi
 
 
 def run_collection_pipeline(paths_config: str):
