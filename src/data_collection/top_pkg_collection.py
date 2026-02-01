@@ -1,9 +1,13 @@
-import os
 import json
 import time
+import math
+import shlex
+import shutil
 import random
 import hashlib
+import tarfile
 import requests
+import subprocess
 from tqdm import tqdm
 from pathlib import Path
 from typing import Tuple, Dict
@@ -18,13 +22,14 @@ class TopPyPi:
     timeout = 30 # Request timeout
     max_retries = 3
     pypi_json_endpoint = 'json'
-    uni_rnd_lim = (0, 0.2) # Random time limits
+    uni_rnd_lim = (0, 0.5) # Random time limits
     hash_algo = 'sha256'
     chunk_size = 65536 # 64kb
+    num_batches = 10
 
     def __init__(
             self, 
-            num_packs: int, 
+            num_packs: int,
             out_dir: str | Path, 
             list_url: str = TOP_URL,
             pypi_url: str = PYPI_URL, 
@@ -34,16 +39,20 @@ class TopPyPi:
         Constructor of Top N PyPi package downloader.
         
         Args:
-            num_packs: Number of top packages to be dowloaded
-            out_dir: Output directory path
-            list_url: URL for top pypi packages list.
+            num_packs (int): Number of top packages to be dowloaded
+            out_dir (str | Path): Output directory path
+            list_url (str): URL for top pypi packages list.
                 Default = hugovk.github.io/...
-            pypi_url: PyPi URL
-            max_workers: Maximum number of worker threads.
+            pypi_url (str): PyPi URL
+            max_workers (int): Maximum number of worker threads.
                 Default = 16
         """
         self.num_packs = num_packs
-
+        if self.num_packs % 10 != 0 :
+            raise ValueError(
+                'Number of packages to be downloaded must be multiple of 10.'
+            )
+        
         if not isinstance(out_dir, Path) and isinstance(out_dir, str):
             self.out_dir = Path(out_dir)
         else:
@@ -59,14 +68,15 @@ class TopPyPi:
         )
         
         self.topN_list = []
-        
-    def _save_to_json(self, data_dict: dict, output_file: str):
+    
+    @staticmethod
+    def _save_to_json(data_dict: Dict, output_file: str|Path):
         """
         Saves dictionary to a json file.
 
         Args:
-            data_dict: Dictionary containing data to be saved
-            output_file: Path to output file
+            data_dict (Dict): Dictionary containing data to be saved
+            output_file (str | Path): Path to output file
         """
         with open(output_file, 'w') as json_file:
             json.dump(data_dict, json_file, indent=4)
@@ -89,7 +99,7 @@ class TopPyPi:
 
         self._save_to_json(
             data,
-            self.out_dir / f'top{self.num_packs}_pypi_{last_update_dt}.json'
+            self.out_dir / f'top_pypi_list{last_update_dt}.json'
         )
 
         # Data format: {'rows': [{...}, {...}], ....}
@@ -100,15 +110,15 @@ class TopPyPi:
         
         self.topN_list = [row.get('project') for row in rows[:self.num_packs]]
     
-    def _fetch_latest_vers(self, pkg) -> str:
+    def _fetch_latest_vers(self, pkg: str) -> str:
         """
         Fetch latest version of the given package.
 
         Args:
-            pkg: Package name
+            pkg (str): Package name
         
         Returns:
-            version: Version number as string
+            version (str): Version number as string
         """
         for attempt in range(1, self.max_retries + 1):
             try:
@@ -135,12 +145,12 @@ class TopPyPi:
         Stream and download one package@version from PyPI..
 
         Args:
-            url: URL for package endpoint in PyPI
-            out_path: Output path where the package file must be stored
-            expected_hash: Expected hash string
+            url (str): URL for package endpoint in PyPI
+            out_path (str | Path): Output path where the package file must be stored
+            expected_hash (str | None): Expected hash string
 
         Returns:
-            out_path: Output path where the package file is downloaded
+            out_path (Path): Output path where the package file is downloaded
         
         Raises:
             ValueError: checksum mismatch
@@ -170,21 +180,27 @@ class TopPyPi:
         tmp.rename(out_path)
         return out_path
 
-    def _download_pkg_sdist(self, package: str, version: str) -> Dict:
+    def _download_pkg_sdist(
+            self, package: str, version: str, dwnld_dir: Path
+        ) -> Dict:
         """
         Downloads sdist for package@version from PyPI via JSON metadata.
 
         Args:
-            package: Package name
-            version: Version number as string
+            package (str): Package name
+            version (str): Version number as string
+            dwnld_dir (Path) : Path to where the downloaded files should be stored
     
         Returns:
-            dwnld_info: Information and downloaded status for given package@version
+            dwnld_info (Dict): Information and downloaded status for given package@version
 
         """
         dwnld_info = {
             'package': package, 'version': version, 'downloaded': None, 'message': None
         }
+        if not version:
+                dwnld_info.update({'downloaded': False, 'message': 'no version'})
+                return dwnld_info
         try:
             # Build package@version URL
             meta_url = f'{self.pypi_url}{package}/{version}/{self.pypi_json_endpoint}'
@@ -210,7 +226,7 @@ class TopPyPi:
             url = sdist['url']
             filename = sdist['filename']
             sha256 = sdist.get('digests', {}).get(self.hash_algo)
-            out_path = self.out_dir / filename
+            out_path = dwnld_dir / filename
 
             # retry loop
             for attempt in range(1, self.max_retries + 1):
@@ -226,32 +242,122 @@ class TopPyPi:
                     if attempt == self.max_retries:
                         dwnld_info.update({'downloaded': False, 'message': f'download-failed:{e}'})
                         return dwnld_info
-                    backoff = 2 ** attempt + random.random()
-                    time.sleep(backoff)
+                    wait = 2 ** attempt + random.random()
+                    time.sleep(wait)
             dwnld_info.update({'downloaded': False, 'message': 'unreachable'})
             return dwnld_info
         except Exception as e:
             dwnld_info.update({'downloaded': False, 'message': f'meta-error:{e}'})
             return dwnld_info
     
-    def _process_one_pack(self, pkg: str) -> Dict:
+    def _process_one_pack(self, pkg: str, output_dir: Path) -> Dict:
         """
         Collects latest version of a package from PyPI and 
         then download the package file.
         This is a target function for child threads.
 
         Args:
-            pkg: Package name
+            pkg (str): Package name
+            output_dir (Path): Path to where the downloaded files should be stored
         
         Returns:
-            download_info: Dictionary containing information about the package download
+            download_info (Dict): Dictionary containing information 
+                about the package download
         """
         # fetch metadata first
         version = self._fetch_latest_vers(pkg)
         # small randomized sleep to spread requests (optional)
         time.sleep(random.uniform(self.uni_rnd_lim[0], self.uni_rnd_lim[1]))
         
-        return self._download_pkg_sdist(pkg, version)
+        return self._download_pkg_sdist(pkg, version, output_dir)
+
+    @staticmethod
+    def _sha256_file(path: str|Path, chunk_size: int = 65536) -> str:
+        """
+        Creates a sha256 checksum to be used for compression integrity validation.
+
+        Args:
+            path (str | Path): Path to directory or file
+            chunk_size (int): Size of chunks streamed. Default = 64kb (65536)
+        
+        Returns:
+            hexdigest (str): Digest value of a string of hexadecimal values
+        """
+        h = hashlib.sha256()
+        with open(path, 'rb') as fh:
+            for chunk in iter(lambda: fh.read(chunk_size), b''):
+                h.update(chunk)
+        return h.hexdigest()
+
+    def _compress_and_cleanup_batch(
+            self, batch_dir: Path, compression_pref: str = 'zstd'
+        ):
+        """
+        Compress a batch directory into a compressed archive.
+
+        If ``compression_preference`` is ``"zstd"`` and the ``zstd`` CLI is available,
+        the directory is streamed using ``tar`` and compressed with ``zstd`` without
+        creating an intermediate uncompressed tar file. Otherwise, a ``.tar.xz``
+        archive is created using Python's ``tarfile`` module.
+
+        Args:
+            batch_dir (Path): Directory containing downloaded packages for the batch.
+            compression_preference (str): Preferred compression method ("zstd" or "xz").
+
+        Returns:
+            dict: Metadata for the created archive with keys:
+                - archive (str): Path to the archive file.
+                - sha256 (str): SHA256 checksum of the archive.
+                - size (int): Size of the archive in bytes.
+                - status (str): Compression status ("ok").
+
+        Raises:
+            FileNotFoundError: If ``batch_dir`` does not exist or is not a directory.
+            Exception: If compression fails (partial archive is removed).
+        """
+        if not batch_dir.exists() or not batch_dir.is_dir():
+            raise FileNotFoundError(f'batch_dir not found or not a directory: {batch_dir}')
+
+        final_archive = None
+        try:
+            zstd_available = shutil.which('zstd') is not None
+            if compression_pref == 'zstd' and zstd_available:
+                # stream tar -> zstd (no intermediate .tar file)
+                final_archive = self.out_dir / f'{batch_dir.name}.tar.zst'
+                # safe quoting of paths/names
+                parent_dir_quoted = shlex.quote(str(batch_dir.parent))
+                batch_name_quoted = shlex.quote(batch_dir.name)
+                out_quoted = shlex.quote(str(final_archive))
+                cmd = f'tar -C {parent_dir_quoted} -cf - {batch_name_quoted} | zstd -19 -T0 -o {out_quoted}'
+                subprocess.run(['bash', '-lc', cmd], check=True)
+            else:
+                # fallback: write .tar.xz using tarfile (pure Python)
+                final_archive = self.out_dir / f'{batch_dir.name}.tar.xz'
+                with tarfile.open(final_archive, 'w:xz') as tarf:
+                    tarf.add(batch_dir, arcname=batch_dir.name)
+
+            # compute sha256 using your helper (assumes self._sha256_file exists)
+            sha256 = self._sha256_file(final_archive)
+            archive_size = final_archive.stat().st_size
+
+            # cleanup original directory now that archive is good
+            shutil.rmtree(batch_dir)
+
+            return {
+                'archive': str(final_archive),
+                'sha256': sha256,
+                'size': archive_size,
+                'status': 'ok'
+            }
+
+        except Exception:
+            # remove any partial archive
+            try:
+                if final_archive is not None and final_archive.exists():
+                    final_archive.unlink()
+            except Exception:
+                pass
+            raise # Raises Exception on main function (download_packages)
 
     def download_packages(self):
         """
@@ -265,46 +371,87 @@ class TopPyPi:
         if not self.topN_list:
             raise RuntimeError('Run `get_top_pypi` before running this method!')
         
-        results = []
-        # Run downloading with threads
-        with ThreadPoolExecutor(max_workers=self.max_workers) as ex:
-            futures = {
-                ex.submit(self._process_one_pack, pkg): pkg for pkg in self.topN_list
-            }
-            for fut in tqdm(as_completed(futures), total=len(futures), desc='Downloading'):
-                pkg = futures[fut]
-                try:
-                    results.append(fut.result())
-                except Exception as e:
-                    results.append(
-                        {
+        batch_size = math.ceil(self.num_packs / self.num_batches)
+
+        overall_results = []
+
+        for batch_idx in range(self.num_batches):
+            start = batch_idx * batch_size
+            end = min(start + batch_size, self.num_packs)
+            batch_pkgs = self.topN_list[start:end]
+            if not batch_pkgs:
+                continue
+
+            batch_name = f'batch_{batch_idx+1:02d}'
+            batch_out_dir = self.out_dir / batch_name
+            batch_out_dir.mkdir(parents=True, exist_ok=True)
+            
+            print(f'Processing {batch_name} packages: {start}..{end-1}')
+
+            # submit downloads for this batch
+            results = []
+            with ThreadPoolExecutor(max_workers=self.max_workers) as ex:
+                futures = {
+                    ex.submit(
+                        self._process_one_pack, pkg, batch_out_dir
+                    ): pkg for pkg in batch_pkgs
+                }
+                
+                for fut in tqdm(as_completed(futures), total=len(futures), desc='Downloading'):
+                    pkg = futures[fut]
+                    try:
+                        results.append(fut.result())
+                    except Exception as e:
+                        results.append({
                             'package': pkg,
                             'version': None,
                             'downloaded': False,
                             'message': f'Unexpected Error:{e}'
-                        }
-                    )
+                        })
 
-        # Save report
+            # Save per-batch report
+            batch_report_path = batch_out_dir / f'{batch_name}_dwnld_report.json'
+            self._save_to_json(results, batch_report_path)
+            overall_results.extend(results)
+        
+            # Compress the whole batch and cleanup uncompressed files
+            try:
+                compress_res = self._compress_and_cleanup_batch(
+                    batch_out_dir, compression_pref='zstd')
+                # write batch manifest with archive info + download report
+                batch_manifest = {
+                    'batch': batch_name,
+                    'start_index': start,
+                    'end_index': end - 1,
+                    'num_packages': len(batch_pkgs),
+                    'archive_info': compress_res,
+                    'download_report': str(batch_report_path)
+                }
+                manifest_path = self.out_dir / f'{batch_name}_manifest.json'
+
+                self._save_to_json(batch_manifest, manifest_path)
+
+                print(f'Compressed {batch_name} -> {compress_res['archive']}')
+            
+            except Exception as e:
+                print(f'Failed to compress {batch_name}: {e}')
+                continue
+        
+        # Save overall summary
         self._save_to_json(
-            results,
+            overall_results,
             self.out_dir / f'top{self.num_packs}_dwnld_report.json'
         )
-        
         # Print download summary
-        ok_count = 0
-        for pkg_res in results:
-            if pkg_res.get('downloaded'):
-                ok_count += 1
-
-        print(f'Successful: {ok_count}/{len(results)}')
+        ok_count = sum(1 for r in overall_results if r.get('downloaded'))
+        print(f'Successful: {ok_count}/{len(overall_results)}')
 
     def set_timeout(self, timeout: int):
         """
         Setter method to set a different request timeout.
         
         Args:
-            timeout: Number of seconds for request timeout.
+            timeout (int): Number of seconds for request timeout.
         """
         self.timeout = timeout
 
@@ -313,7 +460,7 @@ class TopPyPi:
         Setter method to set a maximum number of request retries.
 
         Args:
-            max_retries: Maximum number of retries
+            max_retries (int): Maximum number of retries
         """
         self.max_retries = max_retries
     
@@ -322,7 +469,7 @@ class TopPyPi:
         Setter method to set maximum number of worker threads.
 
         Args:
-            max_workers: Maximum number of worker threads
+            max_workers (int): Maximum number of worker threads
         """
         self.max_workers = max_workers
     
@@ -332,7 +479,7 @@ class TopPyPi:
         This random time is used to add delay between requests.
 
         Args:
-            uni_rnd_lim: (start, end)
+            uni_rnd_lim (Tuple[float, float]): (start, end)
         """
         self.uni_rnd_lim = uni_rnd_lim
     
@@ -341,15 +488,26 @@ class TopPyPi:
         Setter method to set hash algorithm to be used for package metadata.
 
         Args:
-            hash_algo: Hash algorithm type as string
+            hash_algo (str): Hash algorithm type as string
         """
         self.hash_algo = hash_algo
     
     def set_chunk_size(self, chunk_size: int):
         """
-        Setter method to set chunk size for stream downloading
+        Setter method to set chunk size in bytes for stream downloading.
 
         Args:
-            chunk_size: Chunk size as int
+            chunk_size (int): Chunk size as int
         """
         self.chunk_size = chunk_size
+    
+    def set_batch_size(self, batch_size: int):
+        """
+        Setter method to set batch size for downlaoding and compression.
+        num_packs % num_batches must be = 0.
+
+        Args:
+            batch_size (int): size of each batch as integer
+        """
+
+        self.num_batches = batch_size

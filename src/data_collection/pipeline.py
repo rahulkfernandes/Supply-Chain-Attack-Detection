@@ -2,10 +2,17 @@ from pathlib import Path
 from src.data_collection.top_pkg_collection import TopPyPi
 
 
-def run_collection_pipeline(paths_config: str):
+def run_collection_pipeline(benign_pkgs: int, paths_config: str):
+    print('\n', '='*20, ' Data Collection Pipeline ', '='*20)
     
-    raw_path = Path(paths_config['data']['pypi_dir'])
+    if not benign_pkgs or not paths_config:
+        raise RuntimeError(
+            'Number of benign packages and paths_config must be provided!'
+        )
     
-    top_pypi = TopPyPi(5, raw_path) # Change to required number of packages
+    pypi_pkgs_paths = Path(paths_config['data']['pypi_dir'])
+    # raw_dir = Path(paths_config['data']['raw_dir'])
+    
+    top_pypi = TopPyPi(benign_pkgs, pypi_pkgs_paths)
     top_pypi.get_top_pypi()
     top_pypi.download_packages()
