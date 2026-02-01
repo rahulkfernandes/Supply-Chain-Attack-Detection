@@ -11,6 +11,7 @@ import subprocess
 from tqdm import tqdm
 from pathlib import Path
 from typing import Tuple, Dict
+from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
@@ -18,14 +19,91 @@ TOP_URL = 'https://hugovk.github.io/top-pypi-packages/top-pypi-packages.json'
 PYPI_URL = 'https://pypi.org/pypi/'
 MAX_WORKERS = 16
 
-class TopPyPi:
+class ParentDownloader(ABC):
     timeout = 30 # Request timeout
     max_retries = 3
+    num_batches = 10
+
+    def __init__(self, num_packs: int, out_dir: str|Path, list_url: str):
+        """
+        Constructor for parent downloader abstract class containing 
+        common functionality.
+        
+        Args:
+            num_packs (int): Number of top packages to be dowloaded
+            out_dir (str | Path): Output directory path
+            list_url (str): URL for top packages list.
+        """
+        self.num_packs = num_packs
+        if self.num_packs % 10 != 0 :
+            raise ValueError(
+                'Number of packages to be downloaded must be multiple of 10.'
+            )
+        
+        if not isinstance(out_dir, Path) and isinstance(out_dir, str):
+            self.out_dir = Path(out_dir)
+        else:
+            self.out_dir = out_dir
+        
+        self.list_url = list_url
+    
+    @staticmethod
+    def _save_to_json(data_dict: Dict, output_file: str|Path):
+        """
+        Saves dictionary to a json file.
+
+        Args:
+            data_dict (Dict): Dictionary containing data to be saved
+            output_file (str | Path): Path to output file
+        """
+        with open(output_file, 'w') as json_file:
+            json.dump(data_dict, json_file, indent=4)
+            json_file.close()
+    
+    @abstractmethod
+    def download_packages():
+        """
+        Method to download and orchestrate storage.
+        Must be implmented in subclass
+        """
+        pass
+
+    def set_timeout(self, timeout: int):
+        """
+        Setter method to set a different request timeout.
+        
+        Args:
+            timeout (int): Number of seconds for request timeout.
+        """
+        self.timeout = timeout
+
+    def set_max_retries(self, max_retries: int):
+        """
+        Setter method to set a maximum number of request retries.
+
+        Args:
+            max_retries (int): Maximum number of retries
+        """
+        self.max_retries = max_retries
+    
+    def set_num_batches(self, num_batches: int):
+        """
+        Setter method to set batch size for downlaoding and compression.
+        num_packs % num_batches must be = 0.
+
+        Args:
+            batch_size (int): size of each batch as integer
+        """
+        self.num_batches = num_batches
+
+class TopPyPi(ParentDownloader):
+    # timeout = 30 # Request timeout
+    # max_retries = 3
     pypi_json_endpoint = 'json'
     uni_rnd_lim = (0, 0.5) # Random time limits
     hash_algo = 'sha256'
     chunk_size = 65536 # 64kb
-    num_batches = 10
+    # num_batches = 10
 
     def __init__(
             self, 
@@ -47,18 +125,8 @@ class TopPyPi:
             max_workers (int): Maximum number of worker threads.
                 Default = 16
         """
-        self.num_packs = num_packs
-        if self.num_packs % 10 != 0 :
-            raise ValueError(
-                'Number of packages to be downloaded must be multiple of 10.'
-            )
+        super.__init__(num_packs, out_dir, list_url)
         
-        if not isinstance(out_dir, Path) and isinstance(out_dir, str):
-            self.out_dir = Path(out_dir)
-        else:
-            self.out_dir = out_dir
-        
-        self.list_url = list_url
         self.pypi_url = pypi_url
         self.max_workers = max_workers
 
@@ -68,19 +136,6 @@ class TopPyPi:
         )
         
         self.topN_list = []
-    
-    @staticmethod
-    def _save_to_json(data_dict: Dict, output_file: str|Path):
-        """
-        Saves dictionary to a json file.
-
-        Args:
-            data_dict (Dict): Dictionary containing data to be saved
-            output_file (str | Path): Path to output file
-        """
-        with open(output_file, 'w') as json_file:
-            json.dump(data_dict, json_file, indent=4)
-            json_file.close()
 
     def get_top_pypi(self):
         """
@@ -131,7 +186,7 @@ class TopPyPi:
                 return info.get('version')
             except Exception as e:
                 wait = 2 ** attempt + random.random()
-                print(f'[meta] {pkg} attempt {attempt} failed: {e}. retrying in {wait:.1f}s')
+                # print(f'[meta] {pkg} attempt {attempt} failed: {e}. retrying in {wait:.1f}s')
                 time.sleep(wait)
         return None
 
@@ -445,24 +500,6 @@ class TopPyPi:
         # Print download summary
         ok_count = sum(1 for r in overall_results if r.get('downloaded'))
         print(f'Successful: {ok_count}/{len(overall_results)}')
-
-    def set_timeout(self, timeout: int):
-        """
-        Setter method to set a different request timeout.
-        
-        Args:
-            timeout (int): Number of seconds for request timeout.
-        """
-        self.timeout = timeout
-
-    def set_max_retries(self, max_retries: int):
-        """
-        Setter method to set a maximum number of request retries.
-
-        Args:
-            max_retries (int): Maximum number of retries
-        """
-        self.max_retries = max_retries
     
     def set_max_workers(self, max_workers: int):
         """
@@ -500,14 +537,10 @@ class TopPyPi:
             chunk_size (int): Chunk size as int
         """
         self.chunk_size = chunk_size
-    
-    def set_batch_size(self, batch_size: int):
-        """
-        Setter method to set batch size for downlaoding and compression.
-        num_packs % num_batches must be = 0.
 
-        Args:
-            batch_size (int): size of each batch as integer
-        """
+class TopNPM(ParentDownloader):
+    def __init__(self, num_packs: int, out_dir: str|Path, list_url: str):
+        super().__init__(num_packs, out_dir, list_url)
 
-        self.num_batches = batch_size
+    def download_packages(self):
+        pass
