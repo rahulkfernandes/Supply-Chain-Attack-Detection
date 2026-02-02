@@ -125,7 +125,7 @@ class TopPyPi(ParentDownloader):
             max_workers (int): Maximum number of worker threads.
                 Default = 16
         """
-        super.__init__(num_packs, out_dir, list_url)
+        super().__init__(num_packs, out_dir, list_url)
         
         self.pypi_url = pypi_url
         self.max_workers = max_workers
