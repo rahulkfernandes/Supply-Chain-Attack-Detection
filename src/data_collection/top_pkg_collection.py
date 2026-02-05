@@ -10,19 +10,22 @@ import requests
 import subprocess
 from tqdm import tqdm
 from pathlib import Path
+from datetime import datetime
 from typing import Tuple, Dict
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
-TOP_URL = 'https://hugovk.github.io/top-pypi-packages/top-pypi-packages.json'
+TOP_PYPI_URL = 'https://hugovk.github.io/top-pypi-packages/top-pypi-packages.json'
 PYPI_URL = 'https://pypi.org/pypi/'
+
 MAX_WORKERS = 16
 
 class ParentDownloader(ABC):
     timeout = 30 # Request timeout
     max_retries = 3
     num_batches = 10
+    uni_rnd_lim = (0, 0.5) # Random time limits
 
     def __init__(self, num_packs: int, out_dir: str|Path, list_url: str):
         """
@@ -100,7 +103,6 @@ class TopPyPi(ParentDownloader):
     # timeout = 30 # Request timeout
     # max_retries = 3
     pypi_json_endpoint = 'json'
-    uni_rnd_lim = (0, 0.5) # Random time limits
     hash_algo = 'sha256'
     chunk_size = 65536 # 64kb
     # num_batches = 10
@@ -109,12 +111,12 @@ class TopPyPi(ParentDownloader):
             self, 
             num_packs: int,
             out_dir: str | Path, 
-            list_url: str = TOP_URL,
+            list_url: str = TOP_PYPI_URL,
             pypi_url: str = PYPI_URL, 
             max_workers: int = MAX_WORKERS
         ):
         """
-        Constructor of Top N PyPi package downloader.
+        Constructor for Top N PyPi package downloader.
         
         Args:
             num_packs (int): Number of top packages to be dowloaded
@@ -538,9 +540,86 @@ class TopPyPi(ParentDownloader):
         """
         self.chunk_size = chunk_size
 
+TOP_NPM_URL = 'https://api.npms.io/v2/search'
+
 class TopNPM(ParentDownloader):
-    def __init__(self, num_packs: int, out_dir: str|Path, list_url: str):
+    def __init__(
+            self,
+            num_packs: int,
+            out_dir: str | Path,
+            list_url: str = TOP_NPM_URL,
+            max_workers: int = MAX_WORKERS
+        ):
         super().__init__(num_packs, out_dir, list_url)
+
+        self.list_url = list_url
+        self.max_workers = max_workers
+
+        self.topN_list = []
+    
+    def get_top_npm(self):
+        """
+        Get Top npm packages list using npms.io API, sorted by score/popularity.
+        Aggregates all received data across pages, including metadata.
+        Only adds package names to topN_list.
+        Saves several count metrics for clarity.
+        Raises:
+            ValueError: Unexpected JSON layout
+        """
+        all_results = []           # full metadata objects
+        total = None      # API's grand total
+        remaining = self.num_packs
+        from_offset = 0
+        page_size = min(250, remaining)
+
+        while remaining > 0:
+            params = {
+                'q': 'not:deprecated not:insecure', # popularity-weight:5',
+                'size': page_size,
+                'from': from_offset
+            }
+            resp = requests.get(self.list_url, params=params, timeout=self.timeout)
+            resp.raise_for_status()
+            data = resp.json()
+
+            if total is None:
+                total = data.get('total')
+                if total is None:
+                    raise ValueError("API response missing 'total' field")
+
+            results = data.get('results') or []
+            if not results and remaining > 0:
+                raise ValueError('No results returned from npms.io')
+
+            all_results.extend(results)
+            page_packages = [result['package']['name'] for result in results]
+            self.topN_list.extend(page_packages)
+
+            fetched = len(results)
+            remaining -= fetched
+            from_offset += fetched
+            page_size = min(250, remaining)
+
+            if remaining > 0:
+                time.sleep(0.5)
+
+        # Trim
+        self.topN_list = self.topN_list[:self.num_packs]
+        all_results = all_results[:self.num_packs]
+
+        last_update_dt = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+
+        full_data = {
+            'last_update': last_update_dt,
+            'total_matching_in_index': total,
+            'results': all_results
+        }
+
+        self._save_to_json(
+            full_data,
+            self.out_dir / f'top_npm_list_{last_update_dt}.json'
+        )
+
 
     def download_packages(self):
         pass
