@@ -1,5 +1,6 @@
 import os
 import argparse
+from dotenv import load_dotenv
 from scripts.utils import load_config
 from src.data_collection.pipeline import run_collection_pipeline
 
@@ -15,6 +16,10 @@ if __name__ == '__main__':
         help="Number of benign packages to be downloaded."
     )
     args = parser.parse_args()
+    load_dotenv()
+
     paths_config = load_config(os.path.join('config', 'paths.json'))
+
+    libraries_io_key = os.getenv('LIBRARIES_IO_KEY')
     
-    run_collection_pipeline(args.num_pkgs, paths_config)  # Change to required number of packages
+    run_collection_pipeline(args.num_pkgs, paths_config, libraries_io_key)

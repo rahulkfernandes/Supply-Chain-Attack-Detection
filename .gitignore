@@ -6,3 +6,6 @@ data/
 
 # Documentation
 docs/build/
+
+# Environment files
+*.env

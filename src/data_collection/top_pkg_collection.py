@@ -18,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 TOP_PYPI_URL = 'https://hugovk.github.io/top-pypi-packages/top-pypi-packages.json'
 PYPI_URL = 'https://pypi.org/pypi/'
+TOP_NPM_URL = 'https://libraries.io/api/search'
 
 MAX_WORKERS = 16
 
@@ -27,15 +28,22 @@ class ParentDownloader(ABC):
     num_batches = 10
     uni_rnd_lim = (0, 0.5) # Random time limits
 
-    def __init__(self, num_packs: int, out_dir: str|Path, list_url: str):
+    def __init__(
+            self,
+            num_packs: int,
+            out_dir: str|Path,
+            list_url: str,
+            max_workers: int
+        ):
         """
         Constructor for parent downloader abstract class containing 
-        common functionality.
+        common functionality of package downloading.
         
         Args:
             num_packs (int): Number of top packages to be dowloaded
             out_dir (str | Path): Output directory path
-            list_url (str): URL for top packages list.
+            list_url (str): URL for top packages list
+            max_workers (int): Maximum number of worker threads.
         """
         self.num_packs = num_packs
         if self.num_packs % 10 != 0 :
@@ -49,6 +57,7 @@ class ParentDownloader(ABC):
             self.out_dir = out_dir
         
         self.list_url = list_url
+        self.max_workers = max_workers
     
     @staticmethod
     def _save_to_json(data_dict: Dict, output_file: str|Path):
@@ -89,6 +98,25 @@ class ParentDownloader(ABC):
         """
         self.max_retries = max_retries
     
+    def set_max_workers(self, max_workers: int):
+        """
+        Setter method to set maximum number of worker threads.
+
+        Args:
+            max_workers (int): Maximum number of worker threads
+        """
+        self.max_workers = max_workers
+    
+    def set_uni_rnd_lim(self, uni_rnd_lim: Tuple[float, float]):
+        """
+        Setter method to set the limits of uniform random time.
+        This random time is used to add delay between requests.
+
+        Args:
+            uni_rnd_lim (Tuple[float, float]): (start, end)
+        """
+        self.uni_rnd_lim = uni_rnd_lim
+    
     def set_num_batches(self, num_batches: int):
         """
         Setter method to set batch size for downlaoding and compression.
@@ -100,20 +128,17 @@ class ParentDownloader(ABC):
         self.num_batches = num_batches
 
 class TopPyPi(ParentDownloader):
-    # timeout = 30 # Request timeout
-    # max_retries = 3
     pypi_json_endpoint = 'json'
     hash_algo = 'sha256'
     chunk_size = 65536 # 64kb
-    # num_batches = 10
 
     def __init__(
             self, 
             num_packs: int,
             out_dir: str | Path, 
             list_url: str = TOP_PYPI_URL,
-            pypi_url: str = PYPI_URL, 
-            max_workers: int = MAX_WORKERS
+            max_workers: int = MAX_WORKERS,
+            pypi_url: str = PYPI_URL
         ):
         """
         Constructor for Top N PyPi package downloader.
@@ -125,12 +150,11 @@ class TopPyPi(ParentDownloader):
                 Default = hugovk.github.io/...
             pypi_url (str): PyPi URL
             max_workers (int): Maximum number of worker threads.
-                Default = 16
+                Default = MAX_WORKERS (16)
         """
-        super().__init__(num_packs, out_dir, list_url)
+        super().__init__(num_packs, out_dir, list_url, max_workers)
         
         self.pypi_url = pypi_url
-        self.max_workers = max_workers
 
         self.session = requests.Session()
         self.session.headers.update(
@@ -139,9 +163,11 @@ class TopPyPi(ParentDownloader):
         
         self.topN_list = []
 
-    def get_top_pypi(self):
+    def fetch_top_pypi(self):
         """
-        Get Top PyPi packages list.
+        Fetch Top PyPi packages list from hugovk's top PyPI packages list.
+        Downloads and saves the entire list with the data from hugovk's, 
+        but slices the package names list to required number of packages.
 
         Raises:
             ValueError: Unexpected JSON layout
@@ -503,25 +529,6 @@ class TopPyPi(ParentDownloader):
         ok_count = sum(1 for r in overall_results if r.get('downloaded'))
         print(f'Successful: {ok_count}/{len(overall_results)}')
     
-    def set_max_workers(self, max_workers: int):
-        """
-        Setter method to set maximum number of worker threads.
-
-        Args:
-            max_workers (int): Maximum number of worker threads
-        """
-        self.max_workers = max_workers
-    
-    def set_uni_rnd_lim(self, uni_rnd_lim: Tuple[float, float]):
-        """
-        Setter method to set the limits of uniform random time.
-        This random time is used to add delay between requests.
-
-        Args:
-            uni_rnd_lim (Tuple[float, float]): (start, end)
-        """
-        self.uni_rnd_lim = uni_rnd_lim
-    
     def set_hash_algo(self, hash_algo: str):
         """
         Setter method to set hash algorithm to be used for package metadata.
@@ -540,86 +547,117 @@ class TopPyPi(ParentDownloader):
         """
         self.chunk_size = chunk_size
 
-TOP_NPM_URL = 'https://api.npms.io/v2/search'
 
 class TopNPM(ParentDownloader):
+    filter_pkgs = '@types/'
+    
     def __init__(
             self,
             num_packs: int,
             out_dir: str | Path,
+            libraries_io_key: str,
             list_url: str = TOP_NPM_URL,
             max_workers: int = MAX_WORKERS
         ):
-        super().__init__(num_packs, out_dir, list_url)
+        """
+        Constructor for Top N npm package downloader.
+        
+        Args:
+            num_packs (int): Number of top packages to be dowloaded
+            out_dir (str | Path): Output directory path
+            libraries_io_key: (str): API key for Libraries.io
+            list_url (str): URL for top pypi packages list.
+                Default = libraries.io/...
+            max_workers (int): Maximum number of worker threads.
+                Default = MAX_WORKERS (16)
+        """
+        super().__init__(num_packs, out_dir, list_url, max_workers)
 
-        self.list_url = list_url
-        self.max_workers = max_workers
+        self.libraries_io_key = libraries_io_key
 
         self.topN_list = []
-    
-    def get_top_npm(self):
+
+    def fetch_top_npm(self):
         """
-        Get Top npm packages list using npms.io API, sorted by score/popularity.
-        Aggregates all received data across pages, including metadata.
-        Only adds package names to topN_list.
-        Saves several count metrics for clarity.
+        Fetch top npm packages using Libraries.io API (fresh data!).
+        Sorted by download_count.
+        Aggregates metadata and names.
+        Saves count metrics.
+        Filters out @types/ packages before aggregation to ensure we fetch enough.
+
         Raises:
             ValueError: Unexpected JSON layout
         """
-        all_results = []           # full metadata objects
-        total = None      # API's grand total
+        all_results = []  # Full project metadata (filtered)
         remaining = self.num_packs
-        from_offset = 0
-        page_size = min(250, remaining)
+        page = 1  # Libraries.io uses page-based pagination (1-based)
+        per_page = min(25, remaining)  # Use max per_page for efficiency
 
         while remaining > 0:
             params = {
-                'q': 'not:deprecated not:insecure', # popularity-weight:5',
-                'size': page_size,
-                'from': from_offset
+                'platforms': 'NPM',  # Only npm packages
+                'sort': 'downloads_count',  # Or 'dependents_count'
+                'order': 'desc',  # Highest first
+                'page': page,
+                'per_page': per_page,
+                'api_key': self.libraries_io_key
             }
             resp = requests.get(self.list_url, params=params, timeout=self.timeout)
             resp.raise_for_status()
             data = resp.json()
 
-            if total is None:
-                total = data.get('total')
-                if total is None:
-                    raise ValueError("API response missing 'total' field")
+            # libraries.io search returns list directly (array of projects)
+            if not isinstance(data, list):
+                raise ValueError('Unexpected JSON layout from libraries.io - expected array')
 
-            results = data.get('results') or []
-            if not results and remaining > 0:
-                raise ValueError('No results returned from npms.io')
+            if not data and remaining > 0:
+                print("Warning: No more results returned (possible end of results)")
+                break
 
-            all_results.extend(results)
-            page_packages = [result['package']['name'] for result in results]
+            # Filter out @types/ packages here, before aggregation
+            filtered_results = [
+                project for project in data if not project['name'].startswith(self.filter_pkgs)
+            ]
+
+            # Aggregate only filtered metadata
+            all_results.extend(filtered_results)
+
+            # Extract only filtered names
+            page_packages = [project['name'] for project in filtered_results]
             self.topN_list.extend(page_packages)
 
-            fetched = len(results)
+            # Update based on filtered fetched count
+            fetched = len(filtered_results)
             remaining -= fetched
-            from_offset += fetched
-            page_size = min(250, remaining)
+
+            # If we got fewer than per_page after filter, 
+            # might be end - but continue if remaining >0
+            page += 1
 
             if remaining > 0:
-                time.sleep(0.5)
+                time.sleep(1.0)  # Conservative delay — 60 req/min limit
 
-        # Trim
+        # Trim to exact request
         self.topN_list = self.topN_list[:self.num_packs]
         all_results = all_results[:self.num_packs]
+
+        actual_fetched = len(self.topN_list)
 
         last_update_dt = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
 
         full_data = {
             'last_update': last_update_dt,
-            'total_matching_in_index': total,
+            'requested_count': self.num_packs,
+            'actual_fetched_count': actual_fetched,
+            'sort_used': 'downloads_count desc',
             'results': all_results
         }
-
+        
+        # Save all downloaded data
         self._save_to_json(
             full_data,
-            self.out_dir / f'top_npm_list_{last_update_dt}.json'
+            self.out_dir / f'top_npm_list{last_update_dt}.json'
         )
-
 
     def download_packages(self):
         pass
