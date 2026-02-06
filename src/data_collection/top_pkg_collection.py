@@ -119,7 +119,7 @@ class ParentDownloader(ABC):
     
     def set_num_batches(self, num_batches: int):
         """
-        Setter method to set batch size for downlaoding and compression.
+        Setter method to set batch size for downloading and compression.
         num_packs % num_batches must be = 0.
 
         Args:

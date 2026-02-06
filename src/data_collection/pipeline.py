@@ -4,9 +4,18 @@ from src.data_collection.top_pkg_collection import TopPyPi, TopNPM
 
 def run_collection_pipeline(
         benign_pkgs: int,
-        paths_config: str,
+        paths_config: dict,
         libraries_io_key: str
     ):
+    """
+    Run data collection pipeline to download meta data and packages from
+    PyPI and npm.
+
+    Args:
+        benign_pkgs (int): Number of benign packages to be downloaded
+        paths_config (dict): Dictionary containing paths to directories and files
+        libraries_io_key (str): API key to Libraries.io
+    """
     print('\n', '='*20, ' Data Collection Pipeline ', '='*20)
     
     if not benign_pkgs or not paths_config:
@@ -24,5 +33,3 @@ def run_collection_pipeline(
 
     npm_downloader = TopNPM(benign_pkgs, npm_pkgs_path, libraries_io_key)
     npm_downloader.fetch_top_npm()
-
-    # TODO: Use Libraries.io for better npm list
