@@ -27,6 +27,7 @@ class ParentDownloader(ABC):
     max_retries = 3
     num_batches = 10
     uni_rnd_lim = (0, 0.5) # Random time limits
+    chunk_size = 65536 # 64kb
 
     def __init__(
             self,
@@ -72,11 +73,107 @@ class ParentDownloader(ABC):
             json.dump(data_dict, json_file, indent=4)
             json_file.close()
     
+    @staticmethod
+    def _sha256_file(path: str|Path, chunk_size: int = 65536) -> str:
+        """
+        Creates a sha256 checksum to be used for compression integrity validation.
+
+        Args:
+            path (str | Path): Path to directory or file
+            chunk_size (int): Size of chunks streamed. Default = 64kb (65536)
+        
+        Returns:
+            hexdigest (str): Digest value of a string of hexadecimal values
+        """
+        h = hashlib.sha256()
+        with open(path, 'rb') as fh:
+            for chunk in iter(lambda: fh.read(chunk_size), b''):
+                h.update(chunk)
+        return h.hexdigest()
+
+    def _compress_and_cleanup_batch(
+            self, batch_dir: Path, compression_pref: str = 'zstd'
+        ):
+        """
+        Compress a batch directory into a compressed archive.
+
+        If ``compression_preference`` is ``"zstd"`` and the ``zstd`` CLI is available,
+        the directory is streamed using ``tar`` and compressed with ``zstd`` without
+        creating an intermediate uncompressed tar file. Otherwise, a ``.tar.xz``
+        archive is created using Python's ``tarfile`` module.
+
+        Args:
+            batch_dir (Path): Directory containing downloaded packages for the batch.
+            compression_preference (str): Preferred compression method ("zstd" or "xz").
+
+        Returns:
+            dict: Metadata for the created archive with keys:
+                - archive (str): Path to the archive file.
+                - sha256 (str): SHA256 checksum of the archive.
+                - size (int): Size of the archive in bytes.
+                - status (str): Compression status ("ok").
+
+        Raises:
+            FileNotFoundError: If ``batch_dir`` does not exist or is not a directory.
+            Exception: If compression fails (partial archive is removed).
+        """
+        if not batch_dir.exists() or not batch_dir.is_dir():
+            raise FileNotFoundError(f'batch_dir not found or not a directory: {batch_dir}')
+
+        final_archive = None
+        try:
+            zstd_available = shutil.which('zstd') is not None
+            if compression_pref == 'zstd' and zstd_available:
+                # stream tar -> zstd (no intermediate .tar file)
+                final_archive = self.out_dir / f'{batch_dir.name}.tar.zst'
+                # safe quoting of paths/names
+                parent_dir_quoted = shlex.quote(str(batch_dir.parent))
+                batch_name_quoted = shlex.quote(batch_dir.name)
+                out_quoted = shlex.quote(str(final_archive))
+                cmd = f'tar -C {parent_dir_quoted} -cf - {batch_name_quoted} | zstd -19 -T0 -o {out_quoted}'
+                subprocess.run(['bash', '-lc', cmd], check=True)
+            else:
+                # fallback: write .tar.xz using tarfile (pure Python)
+                final_archive = self.out_dir / f'{batch_dir.name}.tar.xz'
+                with tarfile.open(final_archive, 'w:xz') as tarf:
+                    tarf.add(batch_dir, arcname=batch_dir.name)
+
+            # compute sha256 using your helper (assumes self._sha256_file exists)
+            sha256 = self._sha256_file(final_archive)
+            archive_size = final_archive.stat().st_size
+
+            # cleanup original directory now that archive is good
+            shutil.rmtree(batch_dir)
+
+            return {
+                'archive': str(final_archive),
+                'sha256': sha256,
+                'size': archive_size,
+                'status': 'ok'
+            }
+
+        except Exception:
+            # remove any partial archive
+            try:
+                if final_archive is not None and final_archive.exists():
+                    final_archive.unlink()
+            except Exception:
+                pass
+            raise # Raises Exception on main function (download_packages)
+
     @abstractmethod
-    def download_packages():
+    def download_packages(self):
         """
         Method to download and orchestrate storage.
-        Must be implmented in subclass
+        Must be implmented in subclass.
+        """
+        pass
+
+    @abstractmethod
+    def fetch_top_packages(self):
+        """
+        Method to fetch a list of top packages from a well known top list.
+        Must be implemented in subclass.
         """
         pass
 
@@ -126,11 +223,19 @@ class ParentDownloader(ABC):
             batch_size (int): size of each batch as integer
         """
         self.num_batches = num_batches
+    
+    def set_chunk_size(self, chunk_size: int):
+        """
+        Setter method to set chunk size in bytes for stream downloading.
+
+        Args:
+            chunk_size (int): Chunk size as int
+        """
+        self.chunk_size = chunk_size
 
 class TopPyPi(ParentDownloader):
     pypi_json_endpoint = 'json'
     hash_algo = 'sha256'
-    chunk_size = 65536 # 64kb
 
     def __init__(
             self, 
@@ -155,15 +260,10 @@ class TopPyPi(ParentDownloader):
         super().__init__(num_packs, out_dir, list_url, max_workers)
         
         self.pypi_url = pypi_url
-
-        self.session = requests.Session()
-        self.session.headers.update(
-            {'User-Agent': 'supply-chain-collector/1.0 (+you@example.com)'}
-        )
-        
+        self.session = None
         self.topN_list = []
 
-    def fetch_top_pypi(self):
+    def fetch_top_packages(self):
         """
         Fetch Top PyPi packages list from hugovk's top PyPI packages list.
         Downloads and saves the entire list with the data from hugovk's, 
@@ -310,6 +410,9 @@ class TopPyPi(ParentDownloader):
             filename = sdist['filename']
             sha256 = sdist.get('digests', {}).get(self.hash_algo)
             out_path = dwnld_dir / filename
+            meta_data_path = dwnld_dir / f'{package}-{version}.json'
+
+            self._save_to_json(data, meta_data_path)
 
             # retry loop
             for attempt in range(1, self.max_retries + 1):
@@ -354,180 +457,99 @@ class TopPyPi(ParentDownloader):
         
         return self._download_pkg_sdist(pkg, version, output_dir)
 
-    @staticmethod
-    def _sha256_file(path: str|Path, chunk_size: int = 65536) -> str:
-        """
-        Creates a sha256 checksum to be used for compression integrity validation.
-
-        Args:
-            path (str | Path): Path to directory or file
-            chunk_size (int): Size of chunks streamed. Default = 64kb (65536)
-        
-        Returns:
-            hexdigest (str): Digest value of a string of hexadecimal values
-        """
-        h = hashlib.sha256()
-        with open(path, 'rb') as fh:
-            for chunk in iter(lambda: fh.read(chunk_size), b''):
-                h.update(chunk)
-        return h.hexdigest()
-
-    def _compress_and_cleanup_batch(
-            self, batch_dir: Path, compression_pref: str = 'zstd'
-        ):
-        """
-        Compress a batch directory into a compressed archive.
-
-        If ``compression_preference`` is ``"zstd"`` and the ``zstd`` CLI is available,
-        the directory is streamed using ``tar`` and compressed with ``zstd`` without
-        creating an intermediate uncompressed tar file. Otherwise, a ``.tar.xz``
-        archive is created using Python's ``tarfile`` module.
-
-        Args:
-            batch_dir (Path): Directory containing downloaded packages for the batch.
-            compression_preference (str): Preferred compression method ("zstd" or "xz").
-
-        Returns:
-            dict: Metadata for the created archive with keys:
-                - archive (str): Path to the archive file.
-                - sha256 (str): SHA256 checksum of the archive.
-                - size (int): Size of the archive in bytes.
-                - status (str): Compression status ("ok").
-
-        Raises:
-            FileNotFoundError: If ``batch_dir`` does not exist or is not a directory.
-            Exception: If compression fails (partial archive is removed).
-        """
-        if not batch_dir.exists() or not batch_dir.is_dir():
-            raise FileNotFoundError(f'batch_dir not found or not a directory: {batch_dir}')
-
-        final_archive = None
-        try:
-            zstd_available = shutil.which('zstd') is not None
-            if compression_pref == 'zstd' and zstd_available:
-                # stream tar -> zstd (no intermediate .tar file)
-                final_archive = self.out_dir / f'{batch_dir.name}.tar.zst'
-                # safe quoting of paths/names
-                parent_dir_quoted = shlex.quote(str(batch_dir.parent))
-                batch_name_quoted = shlex.quote(batch_dir.name)
-                out_quoted = shlex.quote(str(final_archive))
-                cmd = f'tar -C {parent_dir_quoted} -cf - {batch_name_quoted} | zstd -19 -T0 -o {out_quoted}'
-                subprocess.run(['bash', '-lc', cmd], check=True)
-            else:
-                # fallback: write .tar.xz using tarfile (pure Python)
-                final_archive = self.out_dir / f'{batch_dir.name}.tar.xz'
-                with tarfile.open(final_archive, 'w:xz') as tarf:
-                    tarf.add(batch_dir, arcname=batch_dir.name)
-
-            # compute sha256 using your helper (assumes self._sha256_file exists)
-            sha256 = self._sha256_file(final_archive)
-            archive_size = final_archive.stat().st_size
-
-            # cleanup original directory now that archive is good
-            shutil.rmtree(batch_dir)
-
-            return {
-                'archive': str(final_archive),
-                'sha256': sha256,
-                'size': archive_size,
-                'status': 'ok'
-            }
-
-        except Exception:
-            # remove any partial archive
-            try:
-                if final_archive is not None and final_archive.exists():
-                    final_archive.unlink()
-            except Exception:
-                pass
-            raise # Raises Exception on main function (download_packages)
-
     def download_packages(self):
         """
         Downloads required number of top N packages from PyPI and 
         saves the download status report.
 
         Raises:
-            RuntimeError: When `get_top_pypi` is not run prior to running this method
+            RuntimeError: When `get_top_packages` is not run prior to running this method
         """
         # Check if get_pypi was run
         if not self.topN_list:
-            raise RuntimeError('Run `get_top_pypi` before running this method!')
+            raise RuntimeError('Run `get_top_packages` before running this method!')
         
         batch_size = math.ceil(self.num_packs / self.num_batches)
 
         overall_results = []
-
-        for batch_idx in range(self.num_batches):
-            start = batch_idx * batch_size
-            end = min(start + batch_size, self.num_packs)
-            batch_pkgs = self.topN_list[start:end]
-            if not batch_pkgs:
-                continue
-
-            batch_name = f'batch_{batch_idx+1:02d}'
-            batch_out_dir = self.out_dir / batch_name
-            batch_out_dir.mkdir(parents=True, exist_ok=True)
-            
-            print(f'Processing {batch_name} packages: {start}..{end-1}')
-
-            # submit downloads for this batch
-            results = []
-            with ThreadPoolExecutor(max_workers=self.max_workers) as ex:
-                futures = {
-                    ex.submit(
-                        self._process_one_pack, pkg, batch_out_dir
-                    ): pkg for pkg in batch_pkgs
-                }
-                
-                for fut in tqdm(as_completed(futures), total=len(futures), desc='Downloading'):
-                    pkg = futures[fut]
-                    try:
-                        results.append(fut.result())
-                    except Exception as e:
-                        results.append({
-                            'package': pkg,
-                            'version': None,
-                            'downloaded': False,
-                            'message': f'Unexpected Error:{e}'
-                        })
-
-            # Save per-batch report
-            batch_report_path = batch_out_dir / f'{batch_name}_dwnld_report.json'
-            self._save_to_json(results, batch_report_path)
-            overall_results.extend(results)
         
-            # Compress the whole batch and cleanup uncompressed files
-            try:
-                compress_res = self._compress_and_cleanup_batch(
-                    batch_out_dir, compression_pref='zstd')
-                # write batch manifest with archive info + download report
-                batch_manifest = {
-                    'batch': batch_name,
-                    'start_index': start,
-                    'end_index': end - 1,
-                    'num_packages': len(batch_pkgs),
-                    'archive_info': compress_res,
-                    'download_report': str(batch_report_path)
-                }
-                manifest_path = self.out_dir / f'{batch_name}_manifest.json'
-
-                self._save_to_json(batch_manifest, manifest_path)
-
-                print(f'Compressed {batch_name} -> {compress_res['archive']}')
-            
-            except Exception as e:
-                print(f'Failed to compress {batch_name}: {e}')
-                continue
-        
-        # Save overall summary
-        self._save_to_json(
-            overall_results,
-            self.out_dir / f'top{self.num_packs}_dwnld_report.json'
+        self.session = requests.Session()
+        self.session.headers.update(
+            {'User-Agent': 'supply-chain-collector/1.0 (+you@example.com)'}
         )
-        # Print download summary
-        ok_count = sum(1 for r in overall_results if r.get('downloaded'))
-        print(f'Successful: {ok_count}/{len(overall_results)}')
+        try:
+            for batch_idx in range(self.num_batches):
+                start = batch_idx * batch_size
+                end = min(start + batch_size, self.num_packs)
+                batch_pkgs = self.topN_list[start:end]
+                if not batch_pkgs:
+                    continue
+
+                batch_name = f'batch_{batch_idx+1:02d}'
+                batch_out_dir = self.out_dir / batch_name
+                batch_out_dir.mkdir(parents=True, exist_ok=True)
+                
+                print(f'Processing {batch_name} packages: {start}..{end-1}')
+
+                # submit downloads for this batch
+                results = []
+                with ThreadPoolExecutor(max_workers=self.max_workers) as ex:
+                    futures = {
+                        ex.submit(
+                            self._process_one_pack, pkg, batch_out_dir
+                        ): pkg for pkg in batch_pkgs
+                    }
+                    
+                    for fut in tqdm(as_completed(futures), total=len(futures), desc='Downloading'):
+                        pkg = futures[fut]
+                        try:
+                            results.append(fut.result())
+                        except Exception as e:
+                            results.append({
+                                'package': pkg,
+                                'version': None,
+                                'downloaded': False,
+                                'message': f'Unexpected Error:{e}'
+                            })
+
+                # Save per-batch report
+                batch_report_path = batch_out_dir / f'{batch_name}_dwnld_report.json'
+                self._save_to_json(results, batch_report_path)
+                overall_results.extend(results)
+            
+                # Compress the whole batch and cleanup uncompressed files
+                try:
+                    compress_res = self._compress_and_cleanup_batch(
+                        batch_out_dir, compression_pref='zstd')
+                    # write batch manifest with archive info + download report
+                    batch_manifest = {
+                        'batch': batch_name,
+                        'start_index': start,
+                        'end_index': end - 1,
+                        'num_packages': len(batch_pkgs),
+                        'archive_info': compress_res,
+                        'download_report': str(batch_report_path)
+                    }
+                    manifest_path = self.out_dir / f'{batch_name}_manifest.json'
+
+                    self._save_to_json(batch_manifest, manifest_path)
+
+                    print(f'Compressed {batch_name} -> {compress_res['archive']}')
+                
+                except Exception as e:
+                    print(f'Failed to compress {batch_name}: {e}')
+                    continue
+            
+            # Save overall summary
+            self._save_to_json(
+                overall_results,
+                self.out_dir / f'top{self.num_packs}_dwnld_report.json'
+            )
+            # Print download summary
+            ok_count = sum(1 for r in overall_results if r.get('downloaded'))
+            print(f'Successful: {ok_count}/{len(overall_results)}')
+        finally:
+            self.session.close()
     
     def set_hash_algo(self, hash_algo: str):
         """
@@ -537,15 +559,6 @@ class TopPyPi(ParentDownloader):
             hash_algo (str): Hash algorithm type as string
         """
         self.hash_algo = hash_algo
-    
-    def set_chunk_size(self, chunk_size: int):
-        """
-        Setter method to set chunk size in bytes for stream downloading.
-
-        Args:
-            chunk_size (int): Chunk size as int
-        """
-        self.chunk_size = chunk_size
 
 
 class TopNPM(ParentDownloader):
@@ -577,7 +590,7 @@ class TopNPM(ParentDownloader):
 
         self.topN_list = []
 
-    def fetch_top_npm(self):
+    def fetch_top_packages(self):
         """
         Fetch top npm packages using Libraries.io API (fresh data!).
         Sorted by download_count.
@@ -659,5 +672,99 @@ class TopNPM(ParentDownloader):
             self.out_dir / f'top_npm_list{last_update_dt}.json'
         )
 
-    def download_packages(self):
+    def _process_one_pack(self):
         pass
+
+    def download_packages(self):
+        """
+        Downloads required number of top N packages from NPM and 
+        saves the download status report.
+
+        Raises:
+            RuntimeError: When `get_top_packages` is not run prior to running this method
+        """
+        # # Check if get_top_packages was run
+        # if not self.topN_list:
+        #     raise RuntimeError('Run `get_top_packages` before running this method!')
+        
+        batch_size = math.ceil(self.num_packs / self.num_batches)
+
+        overall_results = []
+
+        self.session = requests.Session()
+        self.session.headers.update(
+            {'User-Agent': 'supply-chain-collector/1.0 (+you@example.com)'}
+        )
+        try:
+            for batch_idx in range(self.num_batches):
+                start = batch_idx * batch_size
+                end = min(start + batch_size, self.num_packs)
+                batch_pkgs = self.topN_list[start:end]
+                if not batch_pkgs:
+                    continue
+
+                batch_name = f'batch_{batch_idx+1:02d}'
+                batch_out_dir = self.out_dir / batch_name
+                batch_out_dir.mkdir(parents=True, exist_ok=True)
+                
+                print(f'Processing {batch_name} packages: {start}..{end-1}')
+
+                # submit downloads for this batch
+                results = []
+                with ThreadPoolExecutor(max_workers=self.max_workers) as ex:
+                    futures = {
+                        ex.submit(
+                            self._process_one_pack, pkg, batch_out_dir
+                        ): pkg for pkg in batch_pkgs
+                    }
+                    
+                    for fut in tqdm(as_completed(futures), total=len(futures), desc='Downloading'):
+                        pkg = futures[fut]
+                        try:
+                            results.append(fut.result())
+                        except Exception as e:
+                            results.append({
+                                'package': pkg,
+                                'version': None,
+                                'downloaded': False,
+                                'message': f'Unexpected Error:{e}'
+                            })
+
+                # Save per-batch report
+                batch_report_path = batch_out_dir / f'{batch_name}_dwnld_report.json'
+                self._save_to_json(results, batch_report_path)
+                overall_results.extend(results)
+            
+                # Compress the whole batch and cleanup uncompressed files
+                try:
+                    compress_res = self._compress_and_cleanup_batch(
+                        batch_out_dir, compression_pref='zstd')
+                    # write batch manifest with archive info + download report
+                    batch_manifest = {
+                        'batch': batch_name,
+                        'start_index': start,
+                        'end_index': end - 1,
+                        'num_packages': len(batch_pkgs),
+                        'archive_info': compress_res,
+                        'download_report': str(batch_report_path)
+                    }
+                    manifest_path = self.out_dir / f'{batch_name}_manifest.json'
+
+                    self._save_to_json(batch_manifest, manifest_path)
+
+                    print(f'Compressed {batch_name} -> {compress_res['archive']}')
+                
+                except Exception as e:
+                    print(f'Failed to compress {batch_name}: {e}')
+                    continue
+            
+            # Save overall summary
+            self._save_to_json(
+                overall_results,
+                self.out_dir / f'top{self.num_packs}_dwnld_report.json'
+            )
+            # Print download summary
+            ok_count = sum(1 for r in overall_results if r.get('downloaded'))
+            print(f'Successful: {ok_count}/{len(overall_results)}')
+        finally:
+            self.session.close()

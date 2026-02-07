@@ -39,6 +39,9 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 2. Update the .env file in root directory with your Libraries.io API key
+```bash
+LIBRARIES_IO_KEY = "<API-KEY>"
+```
 
 ## Usage
 

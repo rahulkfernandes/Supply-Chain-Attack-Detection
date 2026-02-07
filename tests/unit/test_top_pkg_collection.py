@@ -50,7 +50,7 @@ def test_save_to_json_and_get_top_pypi(monkeypatch, tmp_path):
     monkeypatch.setattr('requests.get', lambda *a, **k: FakeResp())
 
     td = TopPyPi(num_packs=10, out_dir=tmp_path)
-    td.fetch_top_pypi()
+    td.fetch_top_packages()
 
     # Check topN_list filled correctly
     assert td.topN_list == [f'pkg{i}' for i in range(1, 11)]
