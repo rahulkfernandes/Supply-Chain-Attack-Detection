@@ -30,11 +30,11 @@ class ParentDownloader(ABC):
     for package downloading.
     """
     
-    timeout = 30 # Request timeout
-    max_retries = 3
+    _timeout = 30 # Request timeout
+    _max_retries = 3
     num_batches = 10
-    uni_rnd_lim = (0, 0.5) # Random time limits
-    chunk_size = 65536 # 64kb
+    _uni_rnd_lim = (0, 0.5) # Random time limits
+    _chunk_size = 65536 # 64kb
 
     def __init__(
             self,
@@ -191,7 +191,7 @@ class ParentDownloader(ABC):
         Args:
             timeout (int): Number of seconds for request timeout.
         """
-        self.timeout = timeout
+        self._timeout = timeout
 
     def set_max_retries(self, max_retries: int):
         """
@@ -200,7 +200,7 @@ class ParentDownloader(ABC):
         Args:
             max_retries (int): Maximum number of retries
         """
-        self.max_retries = max_retries
+        self._max_retries = max_retries
     
     def set_uni_rnd_lim(self, uni_rnd_lim: Tuple[float, float]):
         """
@@ -210,7 +210,7 @@ class ParentDownloader(ABC):
         Args:
             uni_rnd_lim (Tuple[float, float]): (start, end)
         """
-        self.uni_rnd_lim = uni_rnd_lim
+        self._uni_rnd_lim = uni_rnd_lim
     
     def set_num_batches(self, num_batches: int):
         """
@@ -229,15 +229,15 @@ class ParentDownloader(ABC):
         Args:
             chunk_size (int): Chunk size as int
         """
-        self.chunk_size = chunk_size
+        self._chunk_size = chunk_size
 
 class TopPyPi(ParentDownloader):
     """
     TopPyPi class fetches the N latest, popular (by download count) 
     python packages and their meta data.
     """
-    pypi_json_endpoint = 'json'
-    hash_algo = 'sha256'
+    _pypi_json_endpoint = 'json'
+    _hash_algo = 'sha256'
 
     def __init__(
             self, 
@@ -274,7 +274,7 @@ class TopPyPi(ParentDownloader):
         Raises:
             ValueError: Unexpected JSON layout
         """
-        resp = requests.get(self.list_url, timeout=self.timeout)
+        resp = requests.get(self.list_url, timeout=self._timeout)
         resp.raise_for_status()
         data = resp.json()
 
@@ -305,11 +305,11 @@ class TopPyPi(ParentDownloader):
         Returns:
             version (str): Version number as string
         """
-        for attempt in range(1, self.max_retries + 1):
+        for attempt in range(1, self._max_retries + 1):
             try:
                 resp = self.session.get(
-                    self.pypi_url + f'{pkg}/{self.pypi_json_endpoint}', 
-                    timeout=self.timeout
+                    self.pypi_url + f'{pkg}/{self._pypi_json_endpoint}', 
+                    timeout=self._timeout
                 )
                 resp.raise_for_status()
                 info = resp.json().get('info', {})
@@ -343,13 +343,13 @@ class TopPyPi(ParentDownloader):
         out_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = out_path.with_suffix(out_path.suffix + '.part')
 
-        h = hashlib.new(self.hash_algo) if expected_hash else None
+        h = hashlib.new(self._hash_algo) if expected_hash else None
 
         # Streaming session in parts using chunk size
-        with self.session.get(url, stream=True, timeout=self.timeout) as r:
+        with self.session.get(url, stream=True, timeout=self._timeout) as r:
             r.raise_for_status()
             with open(tmp, 'wb') as fh:
-                for chunk in r.iter_content(chunk_size=self.chunk_size):
+                for chunk in r.iter_content(chunk_size=self._chunk_size):
                     if not chunk:
                         continue
                     fh.write(chunk)
@@ -388,8 +388,8 @@ class TopPyPi(ParentDownloader):
                 return dwnld_info
         try:
             # Build package@version URL
-            meta_url = f'{self.pypi_url}{package}/{version}/{self.pypi_json_endpoint}'
-            resp = self.session.get(meta_url, timeout=self.timeout)
+            meta_url = f'{self.pypi_url}{package}/{version}/{self._pypi_json_endpoint}'
+            resp = self.session.get(meta_url, timeout=self._timeout)
             resp.raise_for_status()
             data = resp.json()
             urls = data.get('urls', [])  # list of artifacts for this version
@@ -410,14 +410,14 @@ class TopPyPi(ParentDownloader):
             # Extracting url, name and hash algo to downloaded package
             url = sdist['url']
             filename = sdist['filename']
-            sha256 = sdist.get('digests', {}).get(self.hash_algo)
+            sha256 = sdist.get('digests', {}).get(self._hash_algo)
             out_path = dwnld_dir / filename
             
             meta_data_path = dwnld_dir / f'{package}-{version}.json'
             self._save_to_json(data, meta_data_path)
 
             # retry loop
-            for attempt in range(1, self.max_retries + 1):
+            for attempt in range(1, self._max_retries + 1):
                 try:
                     self._stream_download(
                         url,
@@ -427,7 +427,7 @@ class TopPyPi(ParentDownloader):
                     dwnld_info.update({'downloaded': True, 'message': str(out_path)})
                     return dwnld_info
                 except Exception as e:
-                    if attempt == self.max_retries:
+                    if attempt == self._max_retries:
                         dwnld_info.update({'downloaded': False, 'message': f'download-failed:{e}'})
                         return dwnld_info
                     wait = 2 ** attempt + random.random()
@@ -455,7 +455,7 @@ class TopPyPi(ParentDownloader):
         # fetch metadata first
         version = self._fetch_latest_vers(pkg)
         # small randomized sleep to spread requests (optional)
-        time.sleep(random.uniform(self.uni_rnd_lim[0], self.uni_rnd_lim[1]))
+        time.sleep(random.uniform(self._uni_rnd_lim[0], self._uni_rnd_lim[1]))
         
         return self._download_pkg_sdist(pkg, version, output_dir)
 
@@ -561,7 +561,7 @@ class TopPyPi(ParentDownloader):
         Args:
             hash_algo (str): Hash algorithm type as string
         """
-        self.hash_algo = hash_algo
+        self._hash_algo = hash_algo
 
 
 class TopNPM(ParentDownloader):
@@ -569,9 +569,9 @@ class TopNPM(ParentDownloader):
     TopNPM class fetches the N latest, popular (by download count) 
     npm packages and their meta data.
     """
-    filter_pkgs = '@types/'
-    hash_algo_npm = 'shasum'
-    hash_algo_py = 'sha1' # sha1 = shasum, but npm reg uses 'shasum' conventional name
+    _filter_pkgs = '@types/'
+    _hash_algo_npm = 'shasum'
+    _hash_algo_py = 'sha1' # sha1 = shasum, but npm reg uses 'shasum' conventional name
     
     def __init__(
             self,
@@ -596,7 +596,7 @@ class TopNPM(ParentDownloader):
         """
         super().__init__(num_packs, out_dir, list_url, max_workers)
 
-        self.libraries_io_key = libraries_io_key
+        self._libraries_io_key = libraries_io_key
         self.npm_url = npm_url
 
         self.session = None
@@ -625,9 +625,9 @@ class TopNPM(ParentDownloader):
                 'order': 'desc',  # Highest first
                 'page': page,
                 'per_page': per_page,
-                'api_key': self.libraries_io_key
+                'api_key': self._libraries_io_key
             }
-            resp = requests.get(self.list_url, params=params, timeout=self.timeout)
+            resp = requests.get(self.list_url, params=params, timeout=self._timeout)
             resp.raise_for_status()
             data = resp.json()
 
@@ -641,7 +641,9 @@ class TopNPM(ParentDownloader):
 
             # Filter out @types/ packages here, before aggregation
             filtered_results = [
-                project for project in data if not project['name'].startswith(self.filter_pkgs)
+                project for project in data if not project['name'].startswith(
+                    self._filter_pkgs
+                )
             ]
 
             # Aggregate only filtered metadata
@@ -692,10 +694,10 @@ class TopNPM(ParentDownloader):
         Returns:
             version (str): Latest version or empty if not found
         """
-        for attempt in range(1, self.max_retries + 1):
+        for attempt in range(1, self._max_retries + 1):
             try:
                 meta_url = f'{self.npm_url}{package}'
-                resp = self.session.get(meta_url, timeout=self.timeout)
+                resp = self.session.get(meta_url, timeout=self._timeout)
                 resp.raise_for_status()
                 data = resp.json()
                 return data.get('dist-tags', {}).get('latest', '')
@@ -726,11 +728,11 @@ class TopNPM(ParentDownloader):
         out_path = Path(out_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = out_path.with_suffix(out_path.suffix + '.part')
-        h = hashlib.new(self.hash_algo_py) if expected_hash else None
-        with self.session.get(url, stream=True, timeout=self.timeout) as r:
+        h = hashlib.new(self._hash_algo_py) if expected_hash else None
+        with self.session.get(url, stream=True, timeout=self._timeout) as r:
             r.raise_for_status()
             with open(tmp, 'wb') as fh:
-                for chunk in r.iter_content(chunk_size=self.chunk_size):
+                for chunk in r.iter_content(chunk_size=self._chunk_size):
                     if not chunk:
                         continue
                     fh.write(chunk)
@@ -784,7 +786,7 @@ class TopNPM(ParentDownloader):
         try:
             # Build package metadata URL
             meta_url = f'{self.npm_url}{package}'
-            resp = self.session.get(meta_url, timeout=self.timeout)
+            resp = self.session.get(meta_url, timeout=self._timeout)
             resp.raise_for_status()
             data = resp.json()
             # Get specific version details
@@ -794,7 +796,7 @@ class TopNPM(ParentDownloader):
                 return dwnld_info
             dist = vers_data.get('dist', {})
             tarball_url = dist.get('tarball')
-            shasum = dist.get(self.hash_algo_npm)  # SHA1 hash
+            shasum = dist.get(self._hash_algo_npm)  # SHA1 hash
             if not tarball_url:
                 dwnld_info.update({'downloaded': False, 'message': 'no tarball found'})
                 return dwnld_info
@@ -807,7 +809,7 @@ class TopNPM(ParentDownloader):
             meta_data_path = dwnld_dir / f'{cleaned_pkg_name}-{version}.json'
             self._save_to_json(data, meta_data_path)  # Save full metadata
             # Retry loop
-            for attempt in range(1, self.max_retries + 1):
+            for attempt in range(1, self._max_retries + 1):
                 try:
                     self._stream_download(
                         tarball_url,
@@ -817,7 +819,7 @@ class TopNPM(ParentDownloader):
                     dwnld_info.update({'downloaded': True, 'message': str(out_path)})
                     return dwnld_info
                 except Exception as e:
-                    if attempt == self.max_retries:
+                    if attempt == self._max_retries:
                         dwnld_info.update({'downloaded': False, 'message': f'download-failed:{e}'})
                         return dwnld_info
                     wait = 2 ** attempt + random.random()
@@ -843,7 +845,7 @@ class TopNPM(ParentDownloader):
         # Fetch latest version
         version = self._fetch_latest_vers(pkg)
         # Small randomized sleep to spread requests
-        time.sleep(random.uniform(self.uni_rnd_lim[0], self.uni_rnd_lim[1]))
+        time.sleep(random.uniform(self._uni_rnd_lim[0], self._uni_rnd_lim[1]))
         return self._download_pkg_tgz(pkg, version, output_dir)
 
     def download_packages(self):
@@ -951,5 +953,5 @@ class TopNPM(ParentDownloader):
             hash_algo_py (str): Same hash algorithm but with 
                 python convention name
         """
-        self.hash_algo_npm = hash_algo_npm
-        self.hash_algo_py = hash_algo_py
+        self._hash_algo_npm = hash_algo_npm
+        self._hash_algo_py = hash_algo_py

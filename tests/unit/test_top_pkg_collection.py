@@ -28,13 +28,13 @@ def test_setters_and_attributes(tmp_path):
     td.set_hash_algo('md5')
     td.set_chunk_size(1024)
 
-    assert td.timeout == 5
-    assert td.max_retries == 2
+    assert td._timeout == 5
+    assert td._max_retries == 2
     assert td.num_batches == 5
     assert td.max_workers == 4
-    assert td.uni_rnd_lim == (0.1, 0.2)
-    assert td.hash_algo == 'md5'
-    assert td.chunk_size == 1024
+    assert td._uni_rnd_lim == (0.1, 0.2)
+    assert td._hash_algo == 'md5'
+    assert td._chunk_size == 1024
 
 def test_save_to_json_and_get_top_pypi(monkeypatch, tmp_path):
     # Prepare fake response for requests.get used by get_top_pypi
