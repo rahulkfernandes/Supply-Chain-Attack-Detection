@@ -31,6 +31,6 @@ def run_collection_pipeline(
     pypi_downloader.fetch_top_packages()
     pypi_downloader.download_packages()
 
-    # npm_downloader = TopNPM(benign_pkgs, npm_pkgs_path, libraries_io_key)
-    # # npm_downloader.fetch_top_packages()
-    # npm_downloader.download_packages()
+    npm_downloader = TopNPM(benign_pkgs, npm_pkgs_path, libraries_io_key)
+    npm_downloader.fetch_top_packages()
+    npm_downloader.download_packages()

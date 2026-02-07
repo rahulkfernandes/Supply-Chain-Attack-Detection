@@ -1,3 +1,4 @@
+import re
 import json
 import time
 import math
@@ -19,10 +20,25 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 TOP_PYPI_URL = 'https://hugovk.github.io/top-pypi-packages/top-pypi-packages.json'
 PYPI_URL = 'https://pypi.org/pypi/'
 TOP_NPM_URL = 'https://libraries.io/api/search'
+NPM_URL = 'https://registry.npmjs.org/'
 
 MAX_WORKERS = 16
 
 class ParentDownloader(ABC):
+    """
+    Parent downloader abstract class containing common functionality 
+    for package downloading.
+
+    Attributes:
+        timeout (int): Number of seconds for timeout for requests
+        max_retries (int): Maximum number of request retries
+        num_batches (int): Number of batches to be downloaded and 
+            compressed together
+        uni_rnd_lim (Tuple): Limits of uniform random time to add delay 
+            between requests
+        chunk_size (int): Chunk size in bytes for stream downloading
+    """
+    
     timeout = 30 # Request timeout
     max_retries = 3
     num_batches = 10
@@ -195,15 +211,6 @@ class ParentDownloader(ABC):
         """
         self.max_retries = max_retries
     
-    def set_max_workers(self, max_workers: int):
-        """
-        Setter method to set maximum number of worker threads.
-
-        Args:
-            max_workers (int): Maximum number of worker threads
-        """
-        self.max_workers = max_workers
-    
     def set_uni_rnd_lim(self, uni_rnd_lim: Tuple[float, float]):
         """
         Setter method to set the limits of uniform random time.
@@ -234,6 +241,15 @@ class ParentDownloader(ABC):
         self.chunk_size = chunk_size
 
 class TopPyPi(ParentDownloader):
+    """
+    TopPyPi class fetches the N latest, popular (by download count) 
+    python packages and their meta data.
+
+    Attributes:
+        pypi_json_endpoint (str): json endpoint of the pypi api
+        hash_algo (str): Hash algorithm used by pypi
+            Default = 'sha256'
+    """
     pypi_json_endpoint = 'json'
     hash_algo = 'sha256'
 
@@ -305,7 +321,7 @@ class TopPyPi(ParentDownloader):
         """
         for attempt in range(1, self.max_retries + 1):
             try:
-                resp = requests.get(
+                resp = self.session.get(
                     self.pypi_url + f'{pkg}/{self.pypi_json_endpoint}', 
                     timeout=self.timeout
                 )
@@ -410,8 +426,8 @@ class TopPyPi(ParentDownloader):
             filename = sdist['filename']
             sha256 = sdist.get('digests', {}).get(self.hash_algo)
             out_path = dwnld_dir / filename
+            
             meta_data_path = dwnld_dir / f'{package}-{version}.json'
-
             self._save_to_json(data, meta_data_path)
 
             # retry loop
@@ -439,7 +455,7 @@ class TopPyPi(ParentDownloader):
     def _process_one_pack(self, pkg: str, output_dir: Path) -> Dict:
         """
         Collects latest version of a package from PyPI and 
-        then download the package file.
+        then download the meta data and package file.
         This is a target function for child threads.
 
         Args:
@@ -548,6 +564,7 @@ class TopPyPi(ParentDownloader):
             # Print download summary
             ok_count = sum(1 for r in overall_results if r.get('downloaded'))
             print(f'Successful: {ok_count}/{len(overall_results)}')
+
         finally:
             self.session.close()
     
@@ -562,7 +579,21 @@ class TopPyPi(ParentDownloader):
 
 
 class TopNPM(ParentDownloader):
+    """
+    TopNPM class fetches the N latest, popular (by download count) 
+    npm packages and their meta data.
+
+    Attributes:
+        filter_pkgs (str): filter a specific '@scope/' package. 
+            Here, we filter out '@types/' TypeScript definitions.
+        hash_algo_npm (str): Hash algorithm used by npm.
+            Default = 'shasum'
+        hash_algo_py (str): Same hash algorithm used by npm, but in 
+            python convention. Default = 'sha1'
+    """
     filter_pkgs = '@types/'
+    hash_algo_npm = 'shasum'
+    hash_algo_py = 'sha1' # sha1 = shasum, but npm reg uses 'shasum' conventional name
     
     def __init__(
             self,
@@ -570,7 +601,8 @@ class TopNPM(ParentDownloader):
             out_dir: str | Path,
             libraries_io_key: str,
             list_url: str = TOP_NPM_URL,
-            max_workers: int = MAX_WORKERS
+            max_workers: int = MAX_WORKERS,
+            npm_url: str = NPM_URL
         ):
         """
         Constructor for Top N npm package downloader.
@@ -587,6 +619,7 @@ class TopNPM(ParentDownloader):
         super().__init__(num_packs, out_dir, list_url, max_workers)
 
         self.libraries_io_key = libraries_io_key
+        self.npm_url = npm_url
 
         self.topN_list = []
 
@@ -671,9 +704,168 @@ class TopNPM(ParentDownloader):
             full_data,
             self.out_dir / f'top_npm_list{last_update_dt}.json'
         )
+    
+    def _fetch_latest_vers(self, package: str) -> str:
+        """
+        Fetch the latest version of an npm package from the registry.
+        Args:
+            package (str): Package name
+        Returns:
+            version (str): Latest version or empty if not found
+        """
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                meta_url = f'{self.npm_url}{package}'
+                resp = self.session.get(meta_url, timeout=self.timeout)
+                resp.raise_for_status()
+                data = resp.json()
+                return data.get('dist-tags', {}).get('latest', '')
+            except Exception as e:
+                print(f"Error fetching latest version for {package}: {e}")
+                wait = 2 ** attempt + random.random()
+                time.sleep(wait)
+        return None
+    
+    def _stream_download(
+        self,
+        url: str,
+        out_path: str | Path,
+        expected_hash: str | None = None
+    ) -> Path:
+        """
+        Stream and download one package@version.
+        Args:
+            url (str): URL for package tarball
+            out_path (str | Path): Output path
+            expected_hash (str | None): Expected hash (shasum for npm)
+            hash_algo (str): Hash algorithm (sha1 for npm)
+        Returns:
+            out_path (Path)
+        Raises:
+            ValueError: checksum mismatch
+        """
+        out_path = Path(out_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = out_path.with_suffix(out_path.suffix + '.part')
+        h = hashlib.new(self.hash_algo_py) if expected_hash else None
+        with self.session.get(url, stream=True, timeout=self.timeout) as r:
+            r.raise_for_status()
+            with open(tmp, 'wb') as fh:
+                for chunk in r.iter_content(chunk_size=self.chunk_size):
+                    if not chunk:
+                        continue
+                    fh.write(chunk)
+                    if h:
+                        h.update(chunk)
+        if expected_hash:
+            got = h.hexdigest()
+            if got.lower() != expected_hash.lower():
+                tmp.unlink(missing_ok=True)
+                raise ValueError(f'checksum mismatch: expected {expected_hash} got {got}')
+        tmp.rename(out_path)
+        return out_path
 
-    def _process_one_pack(self):
-        pass
+    @staticmethod
+    def _sanitize_filename(name: str) -> str:
+        """
+        Sanitize a string for safe use in filenames.
+        Replaces invalid chars with '_'.
+
+        Args:
+            name (str): Name of the package that needs cleaning up
+        
+        Returns:
+            sanitized (str): Cleaned string name of the package
+        """
+        # Replace invalid filesystem chars
+        invalid_chars = r'[\/:*?"<>|]'
+        sanitized = re.sub(invalid_chars, '_', name)
+        # Trim leading/trailing '_' or collapse multiples
+        sanitized = re.sub(r'_{2,}', '_', sanitized.strip('_'))
+        return sanitized
+
+    def _download_pkg_tgz(
+        self, package: str, version: str, dwnld_dir: Path
+    ) -> Dict:
+        """
+        Downloads tarball for npm package@version via registry metadata.
+        Args:
+            package (str): Package name
+            version (str): Version number as string
+            dwnld_dir (Path): Path to store downloaded files
+        Returns:
+            dwnld_info (Dict): Download status and info
+        """
+        dwnld_info = {
+            'package': package, 'version': version, 'downloaded': None, 'message': None
+        }
+        if not version:
+            dwnld_info.update({'downloaded': False, 'message': 'no version'})
+            return dwnld_info
+        try:
+            # Build package metadata URL
+            meta_url = f'{self.npm_url}{package}'
+            resp = self.session.get(meta_url, timeout=self.timeout)
+            resp.raise_for_status()
+            data = resp.json()
+            # Get specific version details
+            vers_data = data.get('versions', {}).get(version)
+            if not vers_data:
+                dwnld_info.update({'downloaded': False, 'message': 'version not found'})
+                return dwnld_info
+            dist = vers_data.get('dist', {})
+            tarball_url = dist.get('tarball')
+            shasum = dist.get(self.hash_algo_npm)  # SHA1 hash
+            if not tarball_url:
+                dwnld_info.update({'downloaded': False, 'message': 'no tarball found'})
+                return dwnld_info
+            # Filename typically <package>-<version>.tgz
+
+            cleaned_pkg_name = self._sanitize_filename(package)
+            filename = f'{cleaned_pkg_name}-{version}.tgz'
+            out_path = dwnld_dir / filename
+            
+            meta_data_path = dwnld_dir / f'{cleaned_pkg_name}-{version}.json'
+            self._save_to_json(data, meta_data_path)  # Save full metadata
+            # Retry loop
+            for attempt in range(1, self.max_retries + 1):
+                try:
+                    self._stream_download(
+                        tarball_url,
+                        out_path,
+                        expected_hash=shasum
+                    )
+                    dwnld_info.update({'downloaded': True, 'message': str(out_path)})
+                    return dwnld_info
+                except Exception as e:
+                    if attempt == self.max_retries:
+                        dwnld_info.update({'downloaded': False, 'message': f'download-failed:{e}'})
+                        return dwnld_info
+                    wait = 2 ** attempt + random.random()
+                    time.sleep(wait)
+            dwnld_info.update({'downloaded': False, 'message': 'unreachable'})
+            return dwnld_info
+        except Exception as e:
+            dwnld_info.update({'downloaded': False, 'message': f'meta-error:{e}'})
+            return dwnld_info
+
+    def _process_one_pack(self, pkg: str, output_dir: Path) -> Dict:
+        """
+        Collects latest version of an npm package from registry and
+        then downloads the metadata and tarball.
+        This is a target function for child threads.
+        Args:
+            pkg (str): Package name
+            output_dir (Path): Path to store downloaded files
+        Returns:
+            download_info (Dict): Dictionary containing information 
+                about the package download
+        """
+        # Fetch latest version
+        version = self._fetch_latest_vers(pkg)
+        # Small randomized sleep to spread requests
+        time.sleep(random.uniform(self.uni_rnd_lim[0], self.uni_rnd_lim[1]))
+        return self._download_pkg_tgz(pkg, version, output_dir)
 
     def download_packages(self):
         """
@@ -768,3 +960,17 @@ class TopNPM(ParentDownloader):
             print(f'Successful: {ok_count}/{len(overall_results)}')
         finally:
             self.session.close()
+    
+    def set_hash_algo(self, hash_algo_npm: str, hash_algo_py: str):
+        """
+        Setter method to set hash algorithm to be used for package metadata.
+        There are two arguments since npm uses the 'shasum' convention and 
+        python uses 'sha1'. Both are the same algorithms.
+
+        Args:
+            hash_algo_npm (str): Hash algorithm type for npm
+            hash_algo_py (str): Same hash algorithm but with 
+                python convention name
+        """
+        self.hash_algo_npm = hash_algo_npm
+        self.hash_algo_py = hash_algo_py
