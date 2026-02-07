@@ -28,15 +28,6 @@ class ParentDownloader(ABC):
     """
     Parent downloader abstract class containing common functionality 
     for package downloading.
-
-    Attributes:
-        timeout (int): Number of seconds for timeout for requests
-        max_retries (int): Maximum number of request retries
-        num_batches (int): Number of batches to be downloaded and 
-            compressed together
-        uni_rnd_lim (Tuple): Limits of uniform random time to add delay 
-            between requests
-        chunk_size (int): Chunk size in bytes for stream downloading
     """
     
     timeout = 30 # Request timeout
@@ -244,11 +235,6 @@ class TopPyPi(ParentDownloader):
     """
     TopPyPi class fetches the N latest, popular (by download count) 
     python packages and their meta data.
-
-    Attributes:
-        pypi_json_endpoint (str): json endpoint of the pypi api
-        hash_algo (str): Hash algorithm used by pypi
-            Default = 'sha256'
     """
     pypi_json_endpoint = 'json'
     hash_algo = 'sha256'
@@ -582,14 +568,6 @@ class TopNPM(ParentDownloader):
     """
     TopNPM class fetches the N latest, popular (by download count) 
     npm packages and their meta data.
-
-    Attributes:
-        filter_pkgs (str): filter a specific '@scope/' package. 
-            Here, we filter out '@types/' TypeScript definitions.
-        hash_algo_npm (str): Hash algorithm used by npm.
-            Default = 'shasum'
-        hash_algo_py (str): Same hash algorithm used by npm, but in 
-            python convention. Default = 'sha1'
     """
     filter_pkgs = '@types/'
     hash_algo_npm = 'shasum'
@@ -621,6 +599,7 @@ class TopNPM(ParentDownloader):
         self.libraries_io_key = libraries_io_key
         self.npm_url = npm_url
 
+        self.session = None
         self.topN_list = []
 
     def fetch_top_packages(self):
