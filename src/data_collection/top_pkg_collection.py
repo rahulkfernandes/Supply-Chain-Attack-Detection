@@ -12,17 +12,9 @@ import subprocess
 from tqdm import tqdm
 from pathlib import Path
 from datetime import datetime
-from typing import Tuple, Dict
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
-
-TOP_PYPI_URL = 'https://hugovk.github.io/top-pypi-packages/top-pypi-packages.json'
-PYPI_URL = 'https://pypi.org/pypi/'
-TOP_NPM_URL = 'https://libraries.io/api/search'
-NPM_URL = 'https://registry.npmjs.org/'
-
-MAX_WORKERS = 16
+from src.data_collection import constants as const
 
 class ParentDownloader(ABC):
     """
@@ -41,7 +33,7 @@ class ParentDownloader(ABC):
             num_packs: int,
             out_dir: str|Path,
             list_url: str,
-            max_workers: int
+            max_workers: int = const.MAX_WORKERS
         ):
         """
         Constructor for parent downloader abstract class containing 
@@ -52,6 +44,7 @@ class ParentDownloader(ABC):
             out_dir (str | Path): Output directory path
             list_url (str): URL for top packages list
             max_workers (int): Maximum number of worker threads.
+                Defaults to MAX_WORKERS = 16
         """
         self.num_packs = num_packs
         if self.num_packs % 10 != 0 :
@@ -68,7 +61,7 @@ class ParentDownloader(ABC):
         self.max_workers = max_workers
     
     @staticmethod
-    def _save_to_json(data_dict: Dict, output_file: str|Path):
+    def _save_to_json(data_dict: dict, output_file: str|Path):
         """
         Saves dictionary to a json file.
 
@@ -202,7 +195,7 @@ class ParentDownloader(ABC):
         """
         self._max_retries = max_retries
     
-    def set_uni_rnd_lim(self, uni_rnd_lim: Tuple[float, float]):
+    def set_uni_rnd_lim(self, uni_rnd_lim: tuple[float, float]):
         """
         Setter method to set the limits of uniform random time.
         This random time is used to add delay between requests.
@@ -243,9 +236,9 @@ class TopPyPi(ParentDownloader):
             self, 
             num_packs: int,
             out_dir: str | Path, 
-            list_url: str = TOP_PYPI_URL,
-            max_workers: int = MAX_WORKERS,
-            pypi_url: str = PYPI_URL
+            list_url: str = const.TOP_PYPI_URL,
+            pypi_url: str = const.PYPI_URL,
+            **kwargs
         ):
         """
         Constructor for Top N PyPi package downloader.
@@ -256,10 +249,11 @@ class TopPyPi(ParentDownloader):
             list_url (str): URL for top pypi packages list.
                 Default = hugovk.github.io/...
             pypi_url (str): PyPi URL
-            max_workers (int): Maximum number of worker threads.
-                Default = MAX_WORKERS (16)
+            **kwargs: Arbitrary keyword arguments passed to ParentDownloader.
+                - max_workers (int, optional): Maximum number of worker threads. 
+                  Defaults to MAX_WROKERS = 16.
         """
-        super().__init__(num_packs, out_dir, list_url, max_workers)
+        super().__init__(num_packs, out_dir, list_url, **kwargs)
         
         self.pypi_url = pypi_url
         self.session = None
@@ -367,7 +361,7 @@ class TopPyPi(ParentDownloader):
 
     def _download_pkg_sdist(
             self, package: str, version: str, dwnld_dir: Path
-        ) -> Dict:
+        ) -> dict:
         """
         Downloads sdist for package@version from PyPI via JSON metadata.
 
@@ -377,7 +371,8 @@ class TopPyPi(ParentDownloader):
             dwnld_dir (Path) : Path to where the downloaded files should be stored
     
         Returns:
-            dwnld_info (Dict): Information and downloaded status for given package@version
+            dwnld_info (Dict): Information and downloaded status for given package@version.
+                Existing directory, must be created in before this method.
 
         """
         dwnld_info = {
@@ -391,8 +386,8 @@ class TopPyPi(ParentDownloader):
             meta_url = f'{self.pypi_url}{package}/{version}/{self._pypi_json_endpoint}'
             resp = self.session.get(meta_url, timeout=self._timeout)
             resp.raise_for_status()
-            data = resp.json()
-            urls = data.get('urls', [])  # list of artifacts for this version
+            meta_data_resp = resp.json()
+            urls = meta_data_resp.get('urls', [])  # list of artifacts for this version
             # prefer sdist
             sdist = None
             for item in urls:
@@ -413,9 +408,6 @@ class TopPyPi(ParentDownloader):
             sha256 = sdist.get('digests', {}).get(self._hash_algo)
             out_path = dwnld_dir / filename
             
-            meta_data_path = dwnld_dir / f'{package}-{version}.json'
-            self._save_to_json(data, meta_data_path)
-
             # retry loop
             for attempt in range(1, self._max_retries + 1):
                 try:
@@ -425,6 +417,10 @@ class TopPyPi(ParentDownloader):
                         expected_hash=sha256
                     )
                     dwnld_info.update({'downloaded': True, 'message': str(out_path)})
+
+                    meta_data_path = dwnld_dir / f'{package}-{version}.json'
+                    # Save meta data for successful downloads
+                    self._save_to_json(meta_data_resp, meta_data_path)
                     return dwnld_info
                 except Exception as e:
                     if attempt == self._max_retries:
@@ -438,7 +434,7 @@ class TopPyPi(ParentDownloader):
             dwnld_info.update({'downloaded': False, 'message': f'meta-error:{e}'})
             return dwnld_info
     
-    def _process_one_pack(self, pkg: str, output_dir: Path) -> Dict:
+    def _process_one_pack(self, pkg: str, output_dir: Path) -> dict:
         """
         Collects latest version of a package from PyPI and 
         then download the meta data and package file.
@@ -578,9 +574,9 @@ class TopNPM(ParentDownloader):
             num_packs: int,
             out_dir: str | Path,
             libraries_io_key: str,
-            list_url: str = TOP_NPM_URL,
-            max_workers: int = MAX_WORKERS,
-            npm_url: str = NPM_URL
+            list_url: str = const.TOP_NPM_URL,
+            npm_url: str = const.NPM_URL,
+            **kwargs
         ):
         """
         Constructor for Top N npm package downloader.
@@ -591,10 +587,11 @@ class TopNPM(ParentDownloader):
             libraries_io_key: (str): API key for Libraries.io
             list_url (str): URL for top pypi packages list.
                 Default = libraries.io/...
-            max_workers (int): Maximum number of worker threads.
-                Default = MAX_WORKERS (16)
+            **kwargs: Arbitrary keyword arguments passed to ParentDownloader.
+                - max_workers (int, optional): Maximum number of worker threads. 
+                  Defaults to MAX_WORKERS = 16.
         """
-        super().__init__(num_packs, out_dir, list_url, max_workers)
+        super().__init__(num_packs, out_dir, list_url, **kwargs)
 
         self._libraries_io_key = libraries_io_key
         self.npm_url = npm_url
@@ -767,7 +764,7 @@ class TopNPM(ParentDownloader):
 
     def _download_pkg_tgz(
         self, package: str, version: str, dwnld_dir: Path
-    ) -> Dict:
+    ) -> dict:
         """
         Downloads tarball for npm package@version via registry metadata.
         Args:
@@ -830,7 +827,7 @@ class TopNPM(ParentDownloader):
             dwnld_info.update({'downloaded': False, 'message': f'meta-error:{e}'})
             return dwnld_info
 
-    def _process_one_pack(self, pkg: str, output_dir: Path) -> Dict:
+    def _process_one_pack(self, pkg: str, output_dir: Path) -> dict:
         """
         Collects latest version of an npm package from registry and
         then downloads the metadata and tarball.

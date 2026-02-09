@@ -4,6 +4,7 @@ import json
 import tempfile
 import shutil
 import unittest
+import requests
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 from src.data_collection.top_pkg_collection import TopPyPi
@@ -19,11 +20,10 @@ def test_constructor_invalid_num_packs(tmp_path):
         TopPyPi(num_packs=15, out_dir=tmp_path)  # 15 is not multiple of 10
 
 def test_setters_and_attributes(tmp_path):
-    td = TopPyPi(num_packs=10, out_dir=tmp_path)
+    td = TopPyPi(num_packs=10, out_dir=tmp_path, max_workers=4)
     td.set_timeout(5)
     td.set_max_retries(2)
     td.set_num_batches(5)
-    td.set_max_workers(4)
     td.set_uni_rnd_lim((0.1, 0.2))
     td.set_hash_algo('md5')
     td.set_chunk_size(1024)
@@ -36,8 +36,8 @@ def test_setters_and_attributes(tmp_path):
     assert td._hash_algo == 'md5'
     assert td._chunk_size == 1024
 
-def test_save_to_json_and_get_top_pypi(monkeypatch, tmp_path):
-    # Prepare fake response for requests.get used by get_top_pypi
+def test_save_to_json_and_get_top_packages(monkeypatch, tmp_path):
+    # Prepare fake response for requests.get used by get_top_packages
     fake_data = {
         'last_update': '2025-01-01 12:00:00',
         'rows': [{'project': f'pkg{i}'} for i in range(1, 11)]
@@ -70,16 +70,19 @@ def test_fetch_latest_vers_retries(monkeypatch):
         def raise_for_status(self): pass
         def json(self): return {'info': {'version': '9.9.9'}}
 
-    def fake_requests_get(url, timeout):
+    def fake_session_get(self, url, timeout=None):
         calls['count'] += 1
         if calls['count'] == 1:
             raise ValueError('temp failure')
         return FakeResp()
 
-    monkeypatch.setattr('requests.get', fake_requests_get)
+    # monkeypatch.setattr('requests.get', fake_requests_get)
+    monkeypatch.setattr(requests.Session, 'get', fake_session_get, raising=True)
     td = TopPyPi(num_packs=10, out_dir=Path(tempfile.mkdtemp()))
+    td.session = requests.Session()
     td.set_max_retries(3)
     v = td._fetch_latest_vers('somepkg')
+    td.session.close()
     assert v == '9.9.9'
 
 def test_sha256_file(tmp_path):
@@ -110,6 +113,7 @@ def make_streaming_response(content_bytes: bytes):
 
 def test_stream_download_success_and_checksum(tmp_path):
     td = TopPyPi(num_packs=10, out_dir=tmp_path)
+    td.session = requests.Session()
     # prepare fake session.get to return streaming response
     content = b'some data for package'
     resp_obj = make_streaming_response(content)
@@ -135,7 +139,9 @@ def test_stream_download_success_and_checksum(tmp_path):
 
 def test__download_pkg_sdist_variants(monkeypatch, tmp_path):
     td = TopPyPi(num_packs=10, out_dir=tmp_path)
+    td.session = requests.Session()
     # 1) version == None
+
     res = td._download_pkg_sdist('pkg', None, tmp_path)
     assert res['downloaded'] is False
     assert 'no version' in res['message']
@@ -162,7 +168,8 @@ def test__download_pkg_sdist_variants(monkeypatch, tmp_path):
         out_path.write_bytes(b'payload')
         return out_path
 
-    monkeypatch.setattr(TopPyPi, '_stream_download', staticmethod(fake_stream_write))
+    # monkeypatch.setattr(TopPyPi, '_stream_download', staticmethod(fake_stream_write))
+    monkeypatch.setattr(td, '_stream_download', fake_stream_write)
 
     # prepare a metadata response with a sdist entry
     sdist = {
@@ -177,7 +184,9 @@ def test__download_pkg_sdist_variants(monkeypatch, tmp_path):
 
     td.session.get = lambda *a, **k: MetaRespOk()
     outdir = tmp_path / 'dwnlds'
+    outdir.mkdir(parents=True, exist_ok=True) 
     res = td._download_pkg_sdist('pkg', '1.0', outdir)
+    td.session.close()
     assert res['downloaded'] is True
     assert str(outdir / sdist['filename']) in res['message']
     # ensure file exists
@@ -258,7 +267,7 @@ class TestTopPyPiDownloader(unittest.TestCase):
         with self.assertRaises(RuntimeError) as context:
             downloader.download_packages()
         
-        self.assertIn("Run `get_top_pypi` before", str(context.exception))
+        self.assertIn("Run `get_top_packages` before", str(context.exception))
 
     def test_download_packages_successful_flow(self):
         """
@@ -709,5 +718,5 @@ class TestTopPyPiDownloader(unittest.TestCase):
 #     top_pypi_instance.topN_list = []  # Empty list
 #     with pytest.raises(RuntimeError) as exc_info:
 #         top_pypi_instance.download_packages()
-#     assert str(exc_info.value) == 'Run `get_top_pypi` before running this method!'
+#     assert str(exc_info.value) == 'Run `get_top_packages` before running this method!'
 #     mock_executor.assert_not_called()  # No threads if no packages
