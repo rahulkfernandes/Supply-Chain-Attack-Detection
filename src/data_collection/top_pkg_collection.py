@@ -1,4 +1,5 @@
 import re
+import json
 import time
 import math
 import shlex
@@ -14,9 +15,6 @@ from datetime import datetime
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from src.data_collection import constants as const
-from src.utils import save_to_json
-
-REGISTRY_SEARCH_URL = "https://registry.npmjs.org/-/v1/search"
 
 class ParentDownloader(ABC):
     """
@@ -61,6 +59,19 @@ class ParentDownloader(ABC):
         
         self.list_url = list_url
         self.max_workers = max_workers
+    
+    @staticmethod
+    def _save_to_json(data_dict: dict, output_file: str):
+        """
+        Saves dictionary to a json file.
+
+        Args:
+            data_dict (Dict): Dictionary containing data to be saved
+            output_file (str | Path): Path to output file
+        """
+        with open(output_file, 'w') as json_file:
+            json.dump(data_dict, json_file, indent=4)
+            json_file.close()
     
     @staticmethod
     def _sha256_file(path: str|Path, chunk_size: int = 65536) -> str:
@@ -265,7 +276,7 @@ class TopPyPi(ParentDownloader):
         last_update_dt = data['last_update']
         last_update_dt.replace(' ', '_')
 
-        save_to_json(
+        self._save_to_json(
             data,
             self.out_dir / f'top_pypi_list{last_update_dt}.json'
         )
@@ -409,7 +420,7 @@ class TopPyPi(ParentDownloader):
 
                     meta_data_path = dwnld_dir / f'{package}-{version}.json'
                     # Save meta data for successful downloads
-                    save_to_json(meta_data_resp, meta_data_path)
+                    self._save_to_json(meta_data_resp, meta_data_path)
                     return dwnld_info
                 except Exception as e:
                     if attempt == self._max_retries:
@@ -501,7 +512,7 @@ class TopPyPi(ParentDownloader):
 
                 # Save per-batch report
                 batch_report_path = batch_out_dir / f'{batch_name}_dwnld_report.json'
-                save_to_json(results, batch_report_path)
+                self._save_to_json(results, batch_report_path)
                 overall_results.extend(results)
             
                 # Compress the whole batch and cleanup uncompressed files
@@ -519,7 +530,7 @@ class TopPyPi(ParentDownloader):
                     }
                     manifest_path = self.out_dir / f'{batch_name}_manifest.json'
 
-                    save_to_json(batch_manifest, manifest_path)
+                    self._save_to_json(batch_manifest, manifest_path)
 
                     print(f'Compressed {batch_name} -> {compress_res['archive']}')
                 
@@ -528,7 +539,7 @@ class TopPyPi(ParentDownloader):
                     continue
             
             # Save overall summary
-            save_to_json(
+            self._save_to_json(
                 overall_results,
                 self.out_dir / f'top{self.num_packs}_dwnld_report.json'
             )
@@ -670,111 +681,10 @@ class TopNPM(ParentDownloader):
         }
         
         # Save all downloaded data
-        save_to_json(
+        self._save_to_json(
             full_data,
             self.out_dir / f'top_npm_list{last_update_dt}.json'
         )
-
-    def fetch_top_packages_registry(self):
-        """
-        Fetch top npm package NAMES using the npm registry search endpoint:
-        GET https://registry.npmjs.org/-/v1/search?text=&size=...&from=...
-        This returns objects[].package which contains .name.
-        """
-        all_results = []
-        remaining = self.num_packs
-        offset = 0
-        per_page = min(250, remaining)   # registry supports size; 250 is a good batch
-        max_retries = 5
-        session = requests.Session()
-        session.headers.update({"User-Agent": "your-app-or-email (fetch-top-packages)"})
-
-        # conservative delay between requests (tune if needed)
-        wait_per_req = getattr(self, "wait_per_req", 0.5)
-
-        while remaining > 0:
-            params = {
-                "text": "",       # empty text => global listing (works on registry search). 
-                "size": per_page,
-                "from": offset
-            }
-
-            attempt = 0
-            while attempt < max_retries:
-                attempt += 1
-                try:
-                    resp = session.get(REGISTRY_SEARCH_URL, params=params, timeout=(10, 60))
-                    if resp.status_code == 429:
-                        # Server tells us to slow down — exponential backoff
-                        backoff = min(60, 2 ** attempt)
-                        print(f"429 from registry, backing off {backoff}s (attempt {attempt})")
-                        time.sleep(backoff)
-                        continue
-                    resp.raise_for_status()
-                    data = resp.json()
-                    break
-                except (requests.exceptions.RequestException, ValueError) as e:
-                    backoff = min(60, 2 ** attempt)
-                    print(f"Transient error fetching registry page (attempt {attempt}): {e}. Backing off {backoff}s.")
-                    time.sleep(backoff)
-            else:
-                print(f"Failed to fetch offset {offset} after {max_retries} attempts. Stopping.")
-                break
-
-            # 'objects' contains results; each object has .package
-            objects = data.get("objects", [])
-            if not objects:
-                print("No more results returned by registry search; breaking.")
-                break
-
-            # filter @types/ and extract package metadata and names
-            filtered = []
-            for obj in objects:
-                pkg = obj.get("package") or {}
-                name = pkg.get("name")
-                if not name:
-                    continue
-                if name.startswith(self._filter_pkgs):
-                    continue
-                filtered.append(pkg)
-
-            # aggregate
-            all_results.extend(filtered)
-            page_names = [p["name"] for p in filtered]
-            self.topN_list.extend(page_names)
-
-            fetched = len(filtered)
-            remaining -= fetched
-            print(f"Offset {offset} fetched {fetched} filtered packages; remaining target: {max(0, remaining)}")
-
-            # advance offset and per_page for next loop
-            offset += per_page
-            per_page = min(250, remaining)
-
-            if remaining > 0:
-                time.sleep(wait_per_req)
-
-        # Trim to exact request
-        self.topN_list = self.topN_list[:self.num_packs]
-        all_results = all_results[:self.num_packs]
-
-        actual_fetched = len(self.topN_list)
-        last_update_dt = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-
-        full_data = {
-            'last_update': last_update_dt,
-            'requested_count': self.num_packs,
-            'actual_fetched_count': actual_fetched,
-            'sort_used': 'registry default ordering (search score/popularity proxies)',
-            'results': all_results
-        }
-
-        save_to_json(
-            full_data,
-            self.out_dir / f'top_npm_list{last_update_dt}.json'
-        )
-        print(self.topN_list)
-
     
     def _fetch_latest_vers(self, package: str) -> str:
         """
@@ -897,7 +807,7 @@ class TopNPM(ParentDownloader):
             out_path = dwnld_dir / filename
             
             meta_data_path = dwnld_dir / f'{cleaned_pkg_name}-{version}.json'
-            save_to_json(data, meta_data_path)  # Save full metadata
+            self._save_to_json(data, meta_data_path)  # Save full metadata
             # Retry loop
             for attempt in range(1, self._max_retries + 1):
                 try:
@@ -995,7 +905,7 @@ class TopNPM(ParentDownloader):
 
                 # Save per-batch report
                 batch_report_path = batch_out_dir / f'{batch_name}_dwnld_report.json'
-                save_to_json(results, batch_report_path)
+                self._save_to_json(results, batch_report_path)
                 overall_results.extend(results)
             
                 # Compress the whole batch and cleanup uncompressed files
@@ -1013,7 +923,7 @@ class TopNPM(ParentDownloader):
                     }
                     manifest_path = self.out_dir / f'{batch_name}_manifest.json'
 
-                    save_to_json(batch_manifest, manifest_path)
+                    self._save_to_json(batch_manifest, manifest_path)
 
                     print(f'Compressed {batch_name} -> {compress_res['archive']}')
                 
@@ -1022,7 +932,7 @@ class TopNPM(ParentDownloader):
                     continue
             
             # Save overall summary
-            save_to_json(
+            self._save_to_json(
                 overall_results,
                 self.out_dir / f'top{self.num_packs}_dwnld_report.json'
             )
