@@ -3,10 +3,11 @@
 */.pytest_cache
 
 # Data files
-data/
+data/raw
 
 # Documentation
 docs/build/
 
 # Environment files
 *.env
+.DS_Store
