@@ -602,89 +602,35 @@ class TopNPM(ParentDownloader):
 
     def fetch_top_packages(self):
         """
-        Fetch top npm packages using Libraries.io API (fresh data!).
-        Sorted by download_count.
-        Aggregates metadata and names.
-        Saves count metrics.
-        Filters out @types/ packages before aggregation to ensure we fetch enough.
-
+        Fetch top npm packages from downloaded list of top npm packages from BigQuery - Deps.Dev.
+        Sorted by download count.
         Raises:
-            ValueError: Unexpected JSON layout
+            FileNotFound: Top npm json list not found
+            RuntimeError: Number of packages in the top list is lower than `self.num_packs`
         """
-        all_results = []  # Full project metadata (filtered)
-        remaining = self.num_packs
-        page = 1  # Libraries.io uses page-based pagination (1-based)
-        per_page = min(100, remaining)  # Use max per_page for efficiency
+        # 1. Convert string path to Path object if it isn't one
+        base_path = Path(self.out_dir)
 
-        while remaining > 0:
-            params = {
-                'platforms': 'NPM',  # Only npm packages
-                'sort': 'downloads_count',  # Or 'dependents_count'
-                'order': 'desc',  # Highest first
-                'page': page,
-                'per_page': per_page,
-                'api_key': self._libraries_io_key
-            }
-            resp = requests.get(self.list_url, params=params, timeout=self._timeout)
-            resp.raise_for_status()
-            data = resp.json()
+        # 2. Use .glob() to find all matching files
+        # sorted() puts the latest timestamp at the end of the list
+        files = sorted(base_path.glob('top_npm_list*.json'))
 
-            # libraries.io search returns list directly (array of projects)
-            if not isinstance(data, list):
-                raise ValueError('Unexpected JSON layout from libraries.io - expected array')
+        if not files:
+            print('No matching files found!')
+            raise FileNotFoundError('Top npm json list not found')
 
-            if not data and remaining > 0:
-                print("Warning: No more results returned (possible end of results)")
-                break
+        # 3. Grab the last one (the newest)
+        latest_file = files[-1]
 
-            # Filter out @types/ packages here, before aggregation
-            filtered_results = [
-                project for project in data if not project['name'].startswith(
-                    self._filter_pkgs
-                )
-            ]
-
-            # Aggregate only filtered metadata
-            all_results.extend(filtered_results)
-
-            # Extract only filtered names
-            page_packages = [project['name'] for project in filtered_results]
-            self.topN_list.extend(page_packages)
-
-            # Update based on filtered fetched count
-            fetched = len(filtered_results)
-            remaining -= fetched
-
-            # If we got fewer than per_page after filter, 
-            # might be end - but continue if remaining >0
-            print(f'Page {page} of Libraries.io fetched.')
-            print(data)
-            page += 1
-
-            if remaining > 0:
-                time.sleep(1.0)  # Conservative delay — 60 req/min limit
-
-        # Trim to exact request
-        self.topN_list = self.topN_list[:self.num_packs]
-        all_results = all_results[:self.num_packs]
-
-        actual_fetched = len(self.topN_list)
-
-        last_update_dt = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-
-        full_data = {
-            'last_update': last_update_dt,
-            'requested_count': self.num_packs,
-            'actual_fetched_count': actual_fetched,
-            'sort_used': 'downloads_count desc',
-            'results': all_results
-        }
+        # 4. Load the JSON
+        with latest_file.open('r', encoding='utf-8') as f:
+            data = json.load(f)
         
-        # Save all downloaded data
-        self._save_to_json(
-            full_data,
-            self.out_dir / f'top_npm_list{last_update_dt}.json'
-        )
+        if len(data) < self.num_packs:
+            raise RuntimeError('Number of packages in the top list is lower that `self.num_packs`.')
+
+        self.topN_list = [row.get('package_name') for row in data[:self.num_packs]]
+ 
     
     def _fetch_latest_vers(self, package: str) -> str:
         """

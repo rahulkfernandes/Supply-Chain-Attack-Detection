@@ -2,8 +2,9 @@
 Run this query in Google BigQuery
 This queries the deps_dev_v1 dataset from deps.dev to produce a list of 
 the top 10000 npm packages based on dependency count (proxy for popularity).
+Filters out @types/ packages.
 
-Save the result csv in data/raw/npm_packages
+Save the result as json in data/raw/npm_packages
 */
 
 SELECT
