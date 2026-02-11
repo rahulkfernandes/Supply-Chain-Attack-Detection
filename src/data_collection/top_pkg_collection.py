@@ -1,4 +1,5 @@
 import re
+import html
 import json
 import time
 import math
@@ -600,6 +601,39 @@ class TopNPM(ParentDownloader):
         self.session = None
         self.topN_list = []
 
+    @staticmethod
+    def clean_pkg_name(raw_string: str):
+        """
+        Cleans an npm package string to its unique identifier for registry lookups.
+        1. Decodes Unicode (e.g., \u003e).
+        2. Extracts the 'leaf' (the last package in a dependency path).
+        3. Removes version tags while preserving @scopes.
+
+        Args:
+            raw_string (str): String name of a package from top lists
+        
+        Returns:
+            clean_name (str): cleaned string name of the npm package
+        """
+        # 1. Decode Unicode characters (like \u003e -> >)
+        decoded = html.unescape(raw_string)
+        
+        # 2. Get the Leaf: split by '>' and take the last element
+        leaf = decoded.split('>')[-1].strip()
+        
+        # 3. Remove version: Split by '@' but handle scopes correctly
+        # If it starts with '@', the first '@' is the scope, not the version.
+        if leaf.startswith('@'):
+            # Split starting from index 1 to ignore the leading '@'
+            parts = leaf[1:].split('@')
+            # Result: '@' + 'scope/name' (ignoring whatever was after the second '@')
+            clean_name = '@' + parts[0]
+        else:
+            # For unscoped packages, just take everything before the '@'
+            clean_name = leaf.split('@')[0]
+            
+        return clean_name
+
     def fetch_top_packages(self):
         """
         Fetch top npm packages from downloaded list of top npm packages from BigQuery - Deps.Dev.
@@ -629,8 +663,12 @@ class TopNPM(ParentDownloader):
         if len(data) < self.num_packs:
             raise RuntimeError('Number of packages in the top list is lower that `self.num_packs`.')
 
-        self.topN_list = [row.get('package_name') for row in data[:self.num_packs]]
- 
+        # self.topN_list = [row.get('package_name') for row in data[:self.num_packs]]
+
+        for row in data[:self.num_packs]:
+            cleaned_pkg_name = self.clean_pkg_name(row.get('package_name'))
+            self.topN_list.append(cleaned_pkg_name)
+        
     
     def _fetch_latest_vers(self, package: str) -> str:
         """
