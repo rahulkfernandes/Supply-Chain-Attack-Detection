@@ -326,7 +326,7 @@ class TestTopPyPiDownloader(unittest.TestCase):
                         }
                         
                         # Mock save_to_json
-                        with patch.object(downloader, '_save_to_json'):
+                        with patch('src.data_collection.top_pkg_collection.save_to_json') as mock_save:
                             with patch('builtins.print') as mock_print:
                                 downloader.download_packages()
                                 
@@ -395,7 +395,7 @@ class TestTopPyPiDownloader(unittest.TestCase):
                         }
                         
                         # Mock save_to_json
-                        with patch.object(downloader, '_save_to_json'):
+                        with patch('src.data_collection.top_pkg_collection.save_to_json') as mock_save:
                             with patch('builtins.print') as mock_print:
                                 downloader.download_packages()
                                 
@@ -457,8 +457,9 @@ class TestTopPyPiDownloader(unittest.TestCase):
                     
                     def save_side_effect(data, filename):
                         saved_data.append((data, str(filename)))
+                        
                     
-                    with patch.object(downloader, '_save_to_json', side_effect=save_side_effect):
+                    with patch('src.data_collection.top_pkg_collection.save_to_json', side_effect=save_side_effect):
                         with patch.object(downloader, '_compress_and_cleanup_batch') as mock_compress:
                             # Mock successful compression
                             mock_compress.return_value = {
@@ -528,7 +529,7 @@ class TestTopPyPiDownloader(unittest.TestCase):
                 with patch(f'{MODULE}.as_completed') as mock_as_completed:
                     mock_as_completed.return_value = iter(futures_dict.keys())
                     
-                    with patch.object(downloader, '_save_to_json'):
+                    with patch('src.data_collection.top_pkg_collection.save_to_json') as mock_save:
                         with patch.object(downloader, '_compress_and_cleanup_batch') as mock_compress:
                             # Mock compression failure
                             mock_compress.side_effect = Exception("Compression failed: Disk full")
@@ -600,7 +601,8 @@ class TestTopPyPiDownloader(unittest.TestCase):
                             'status': 'ok'
                         }
                         
-                        with patch.object(downloader, '_save_to_json') as mock_save:
+                        with patch('src.data_collection.top_pkg_collection.save_to_json') as mock_save:
+
                             saved_data = []
                             
                             def save_side_effect(data, filename):
@@ -680,7 +682,7 @@ class TestTopPyPiDownloader(unittest.TestCase):
                     mock_as_completed.return_value = iter(futures_dict.keys())
                     
                     with patch.object(downloader, '_compress_and_cleanup_batch'):
-                        with patch.object(downloader, '_save_to_json') as mock_save:
+                        with patch('src.data_collection.top_pkg_collection.save_to_json') as mock_save:
                             saved_data = []
                             
                             def save_side_effect(data, filename):

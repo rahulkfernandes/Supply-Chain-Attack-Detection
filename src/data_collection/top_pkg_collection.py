@@ -13,6 +13,7 @@ import subprocess
 from tqdm import tqdm
 from pathlib import Path
 from datetime import datetime
+from src.utils.io import save_to_json
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from src.data_collection import constants as const
@@ -60,19 +61,6 @@ class ParentDownloader(ABC):
         
         self.list_url = list_url
         self.max_workers = max_workers
-    
-    @staticmethod
-    def _save_to_json(data_dict: dict, output_file: str):
-        """
-        Saves dictionary to a json file.
-
-        Args:
-            data_dict (Dict): Dictionary containing data to be saved
-            output_file (str | Path): Path to output file
-        """
-        with open(output_file, 'w') as json_file:
-            json.dump(data_dict, json_file, indent=4)
-            json_file.close()
     
     @staticmethod
     def _sha256_file(path: str|Path, chunk_size: int = 65536) -> str:
@@ -277,7 +265,7 @@ class TopPyPi(ParentDownloader):
         last_update_dt = data['last_update']
         last_update_dt.replace(' ', '_')
 
-        self._save_to_json(
+        save_to_json(
             data,
             self.out_dir / f'top_pypi_list{last_update_dt}.json'
         )
@@ -421,7 +409,7 @@ class TopPyPi(ParentDownloader):
 
                     meta_data_path = dwnld_dir / f'{package}-{version}.json'
                     # Save meta data for successful downloads
-                    self._save_to_json(meta_data_resp, meta_data_path)
+                    save_to_json(meta_data_resp, meta_data_path)
                     return dwnld_info
                 except Exception as e:
                     if attempt == self._max_retries:
@@ -513,7 +501,7 @@ class TopPyPi(ParentDownloader):
 
                 # Save per-batch report
                 batch_report_path = batch_out_dir / f'{batch_name}_dwnld_report.json'
-                self._save_to_json(results, batch_report_path)
+                save_to_json(results, batch_report_path)
                 overall_results.extend(results)
             
                 # Compress the whole batch and cleanup uncompressed files
@@ -531,7 +519,7 @@ class TopPyPi(ParentDownloader):
                     }
                     manifest_path = self.out_dir / f'{batch_name}_manifest.json'
 
-                    self._save_to_json(batch_manifest, manifest_path)
+                    save_to_json(batch_manifest, manifest_path)
 
                     print(f'Compressed {batch_name} -> {compress_res['archive']}')
                 
@@ -540,7 +528,7 @@ class TopPyPi(ParentDownloader):
                     continue
             
             # Save overall summary
-            self._save_to_json(
+            save_to_json(
                 overall_results,
                 self.out_dir / f'top{self.num_packs}_dwnld_report.json'
             )
@@ -791,7 +779,7 @@ class TopNPM(ParentDownloader):
             out_path = dwnld_dir / filename
             
             meta_data_path = dwnld_dir / f'{cleaned_pkg_name}-{version}.json'
-            self._save_to_json(data, meta_data_path)  # Save full metadata
+            save_to_json(data, meta_data_path)  # Save full metadata
             # Retry loop
             for attempt in range(1, self._max_retries + 1):
                 try:
@@ -889,7 +877,7 @@ class TopNPM(ParentDownloader):
 
                 # Save per-batch report
                 batch_report_path = batch_out_dir / f'{batch_name}_dwnld_report.json'
-                self._save_to_json(results, batch_report_path)
+                save_to_json(results, batch_report_path)
                 overall_results.extend(results)
             
                 # Compress the whole batch and cleanup uncompressed files
@@ -907,7 +895,7 @@ class TopNPM(ParentDownloader):
                     }
                     manifest_path = self.out_dir / f'{batch_name}_manifest.json'
 
-                    self._save_to_json(batch_manifest, manifest_path)
+                    save_to_json(batch_manifest, manifest_path)
 
                     print(f'Compressed {batch_name} -> {compress_res['archive']}')
                 
@@ -916,7 +904,7 @@ class TopNPM(ParentDownloader):
                     continue
             
             # Save overall summary
-            self._save_to_json(
+            save_to_json(
                 overall_results,
                 self.out_dir / f'top{self.num_packs}_dwnld_report.json'
             )
