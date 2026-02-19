@@ -15,6 +15,9 @@ def run_collection_pipeline(
         benign_pkgs (int): Number of benign packages to be downloaded
         paths_config (dict): Dictionary containing paths to directories and files
         libraries_io_key (str): API key to Libraries.io
+    
+    Raises:
+        RuntimeError: Number of benign packages or paths config dict is not provided
     """
     print('\n', '='*20, ' Data Collection Pipeline ', '='*20)
     
